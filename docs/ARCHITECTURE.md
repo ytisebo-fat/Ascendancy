@@ -99,6 +99,25 @@ cdecl functions, copied by `VFX_register_driver` (`0x571F1`) to `0x86A78`:
 `runtime/video.cpp` shows it with SDL2. The game's VESA mode check
 (`0x4F112`) is hooked to report mode 0x101 available, so UniVBE is never used.
 
+### Render thread and mouse pointer
+
+The window runs on its own render thread: it shows the framebuffer at the
+monitor refresh rate (vsync), independent of the game's ~33 fps main loop,
+and handles window/input events. The game thread only writes framebuffer
+and palette (like video memory on a VGA card).
+
+The game draws its pointer in software, two ways: the pointer module
+(`0x5FCAC` draw / `0x5FF2E` erase, via windows `0x1220D0` composite and
+`0x1220B8` background) and a "pane refresh with pointer" wrapper (`0x60BF2`)
+that composites the pointer into the off-screen image before refreshing a
+region under it. Both caused flicker and lag once the screen is presented
+asynchronously. The port keeps the pointer out of the image entirely:
+refreshes of the two pointer windows are dropped, `0x60BF2` becomes a plain
+pane refresh, and the pointer shape (rendered with the game's own VFX shape
+routine `0x57EFC`, twice over different fills for an exact mask) is drawn by
+the render thread at the live mouse position. Visibility follows the game's
+show/hide counter (`0x1220AC`) and off-screen flag (`0x1220E4`).
+
 ### Input
 
 - Mouse: the game registers an 18-byte real-mode callback with the mouse

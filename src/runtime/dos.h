@@ -25,6 +25,9 @@ struct DosConfig {
 // Installs the exception handler. Must be called once before running game code.
 void DosInstall(GameImage* image, const DosConfig& cfg);
 
+// Debug: hardware write watchpoint on a host address.
+void DosSetWatch(uint32_t hostAddr);
+
 // Log to ascendancy.log (and stderr). printf-style.
 void Log(const char* fmt, ...);
 

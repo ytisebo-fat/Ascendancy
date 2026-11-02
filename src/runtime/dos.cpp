@@ -67,7 +67,9 @@ bool g_pitHighNext = false;
 uint16_t g_pitLow = 0;
 uint8_t* g_iretStub = nullptr;         // "old handler" for unset vectors
 uint16_t g_codeSel = 0;
-int g_stepBudget = 0;  // --step N: single-step N instructions after each trap
+int g_stepBudget = 0;
+volatile uint32_t g_watchAddr = 0;  // debug: hardware write watchpoint (orig offscreen pixel)
+bool g_watchArmed = false;  // --step N: single-step N instructions after each trap
 
 }  // namespace
 
@@ -862,6 +864,23 @@ DWORD WINAPI TickerThread(void*) {
 LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
   CONTEXT* c = ep->ContextRecord;
   DWORD code = ep->ExceptionRecord->ExceptionCode;
+  if (g_watchAddr && !g_watchArmed) {
+    c->Dr0 = g_watchAddr;
+    c->Dr7 = 0x00010001;  // L0, break on 1-byte write
+    g_watchArmed = true;
+    Log("watch armed at %08x", g_watchAddr);
+  }
+  if (code == EXCEPTION_SINGLE_STEP && (c->Dr6 & 1)) {
+    char buf[512]; int n = 0;
+    const uint32_t* sp = reinterpret_cast<const uint32_t*>(uintptr_t(c->Esp));
+    for (int i = 0; i < 300 && n < 480; ++i)
+      if (g_image->IsCodeHost(sp[i])) n += std::snprintf(buf + n, sizeof buf - n, " %05x", g_image->Orig(sp[i]));
+    static int hits = 0;
+    if (hits++ < 12) Log("WATCH hit: EIP orig %08x val=%02x callers:%s", g_image->Orig(c->Eip),
+                         *reinterpret_cast<uint8_t*>(uintptr_t(g_watchAddr)), buf);
+    c->Dr6 = 0;
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   if (code == EXCEPTION_SINGLE_STEP && g_stepBudget == 0) {
     // trap flag set by the timer thread: deliver the interrupt now
     c->EFlags &= ~0x100u;
@@ -908,6 +927,8 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
 }
 
 }  // namespace
+
+void DosSetWatch(uint32_t hostAddr) { g_watchAddr = hostAddr; g_watchArmed = false; }
 
 void DosInstall(GameImage* image, const DosConfig& cfg) {
   g_image = image;

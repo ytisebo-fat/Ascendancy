@@ -11,6 +11,7 @@
 #include "runtime/vfx_driver.h"
 
 #include <cstring>
+#include <vector>
 
 #include "runtime/dos.h"
 #include "runtime/game_image.h"
@@ -18,6 +19,7 @@
 #include "runtime/video.h"
 
 namespace asc {
+namespace video { extern uint32_t g_debugOffscreenWindowHost; }
 namespace {
 
 using video::kHeight;
@@ -41,6 +43,53 @@ bool g_trace = false;
 #define VFX_TRACE(...) do { static int n_ = 0; if (g_trace && n_++ < 400) Log(__VA_ARGS__); } while (0)
 
 int Clamp(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+// ---------------------------------------------------------------------------
+// Mouse pointer. The game's pointer module (0x5FCAC draw, 0x5FF2E erase)
+// saves the background into the window at 0x1220B8, composites the pointer
+// shape over it in the window at 0x1220D0, and refreshes that to the screen.
+// The port keeps the pointer out of the framebuffer altogether: the render
+// thread draws it as an overlay at the live mouse position. The shape is
+// rendered with the game's own VFX shape routine.
+// ---------------------------------------------------------------------------
+constexpr uint32_t kCursorBgWindow = 0x1220B8;
+constexpr uint32_t kCursorCompWindow = 0x1220D0;
+constexpr uint32_t kCursorShapes = 0x12208C, kCursorFrame = 0x122074;
+constexpr uint32_t kCursorW = 0x122090, kCursorH = 0x1220CC;
+constexpr uint32_t kCursorHotX = 0x1220B0, kCursorHotY = 0x1220B4;
+constexpr uint32_t kCursorShowCount = 0x1220AC, kCursorHidden = 0x1220E4;
+constexpr uint32_t kVfxShapeDraw = 0x57EFC;  // (PANE*, shapes, frame, x, y) cdecl
+
+template <typename T> T& Var(uint32_t a) { return *g_image->Ptr<T>(a); }
+
+void CaptureCursor() {
+  static uint32_t lastShapes = 0;
+  static int32_t lastFrame = -1, lastW = 0, lastH = 0, lastHx = 0, lastHy = 0;
+  uint32_t shapes = Var<uint32_t>(kCursorShapes);
+  int32_t frame = Var<int32_t>(kCursorFrame);
+  int32_t w = Var<int32_t>(kCursorW), h = Var<int32_t>(kCursorH);
+  int32_t hx = Var<int32_t>(kCursorHotX), hy = Var<int32_t>(kCursorHotY);
+  if (shapes == lastShapes && frame == lastFrame && w == lastW && h == lastH && hx == lastHx && hy == lastHy)
+    return;
+  if (w <= 0 || h <= 0 || w > 256 || h > 256 || !shapes) return;
+  lastShapes = shapes; lastFrame = frame; lastW = w; lastH = h; lastHx = hx; lastHy = hy;
+
+  using ShapeDraw = void(__cdecl*)(void*, void*, int32_t, int32_t, int32_t);
+  ShapeDraw draw = reinterpret_cast<ShapeDraw>(uintptr_t(g_image->Host(kVfxShapeDraw)));
+  std::vector<uint8_t> a(size_t(w) * h, 0x00), b(size_t(w) * h, 0xFF), mask(size_t(w) * h);
+  VfxWindow wa{a.data(), w - 1, h - 1, nullptr, nullptr}, wb{b.data(), w - 1, h - 1, nullptr, nullptr};
+  VfxPane pa{&wa, 0, 0, w - 1, h - 1}, pb{&wb, 0, 0, w - 1, h - 1};
+  draw(&pa, reinterpret_cast<void*>(uintptr_t(shapes)), frame, -hx, -hy);
+  draw(&pb, reinterpret_cast<void*>(uintptr_t(shapes)), frame, -hx, -hy);
+  // Transparent where both differently-filled copies still show their fill.
+  for (size_t i = 0; i < a.size(); ++i) mask[i] = !(a[i] == 0x00 && b[i] == 0xFF);
+  video::SetCursorImage(a, mask, w, h, hx, hy);
+  Log("pointer: shape %d (%dx%d, hotspot %d,%d)", frame, w, h, -hx, -hy);
+}
+
+bool CursorVisible() {
+  return Var<int32_t>(kCursorShowCount) >= 0 && Var<int32_t>(kCursorHidden) == 0;
+}
 
 // Copies a source rectangle of a window to a screen rectangle, scaling with
 // nearest-neighbour when sizes differ (as the original driver does). As in
@@ -92,6 +141,8 @@ void __cdecl VfxWaitVblankLeading() { video::WaitVblank(); }
 void __cdecl VfxWaitVblank() { video::WaitVblank(); }
 
 void __cdecl VfxWindowRefresh(VfxWindow* w, int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+  if (w == g_image->Ptr<VfxWindow>(kCursorCompWindow)) { CaptureCursor(); return; }  // draw pointer
+  if (w == g_image->Ptr<VfxWindow>(kCursorBgWindow)) return;                        // erase pointer
   VFX_TRACE("vfx window_refresh %p (%dx%d) -> %d,%d-%d,%d", (void*)w->buffer, w->xMax + 1, w->yMax + 1, x0, y0, x1, y1);
   static bool warned = false;
   if (w->stencil && !warned) { warned = true; Log("vfx: note - window with stencil refreshed"); }
@@ -100,6 +151,7 @@ void __cdecl VfxWindowRefresh(VfxWindow* w, int32_t x0, int32_t y0, int32_t x1, 
 }
 
 void __cdecl VfxWindowRead(VfxWindow* w, int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+  if (w == g_image->Ptr<VfxWindow>(kCursorBgWindow)) return;  // pointer background: not needed
   VFX_TRACE("vfx window_read %p -> %d,%d-%d,%d", (void*)w->buffer, x0, y0, x1, y1);
   // screen rectangle -> whole window
   x0 = Clamp(x0, 0, kWidth - 1); x1 = Clamp(x1, 0, kWidth - 1);
@@ -153,6 +205,27 @@ void* g_table[13] = {
     reinterpret_cast<void*>(VfxLineAddress),
 };
 
+// Hook for the game's "pane refresh with pointer" wrapper (0x60BF2). On DOS it
+// drew the pointer into the pane before refreshing a region under it, to
+// avoid flicker. With the pointer as an overlay, every refresh is plain.
+// Watcom register convention: EAX pane, EDX x0, EBX y0, ECX x1, [esp+4] y1,
+// callee pops 4; ESI/EDI/EBP preserved (the cdecl callee does that).
+void __cdecl PaneRefreshFromGame(VfxPane* p, int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+  VfxPaneRefresh(p, x0, y0, x1, y1);
+}
+void PaneRefreshWatcomThunk();
+__asm__(
+    ".text\n"
+    "_PaneRefreshWatcomThunk:\n"
+    "  pushl 4(%esp)\n"   // y1
+    "  pushl %ecx\n"      // x1
+    "  pushl %ebx\n"      // y0
+    "  pushl %edx\n"      // x0
+    "  pushl %eax\n"      // pane
+    "  call _PaneRefreshFromGame\n"
+    "  addl $20, %esp\n"
+    "  ret $4\n");
+
 // Hook for VFX_register_driver (0x571F1): ignore the loaded DLL, install ours.
 void __cdecl RegisterDriver(void* /*loadedDriver*/) {
   std::memcpy(g_image->Ptr<void*>(0x86A78), g_table, sizeof g_table);
@@ -173,9 +246,13 @@ int32_t __cdecl VesaModeSupported(int32_t mode) {
 bool InstallVfxDriver(GameImage& image, bool trace) {
   g_image = &image;
   g_trace = trace;
+  video::SetCursorVisibilityQuery(CursorVisible);
+  video::g_debugOffscreenWindowHost = uint32_t(uintptr_t(image.Ptr<void>(0xC84F8)));
   const HookSpec hooks[] = {
       {"VFX_register_driver", 0x571F1, {0x55, 0x8B, 0xEC, 0x53, 0x56, 0x57, 0x06, 0xFC}, 8,
        reinterpret_cast<void*>(RegisterDriver)},
+      {"pane refresh with pointer", 0x60BF2, {0x56, 0x57, 0x55, 0x89, 0xE5, 0x81, 0xEC, 0xB0}, 8,
+       reinterpret_cast<void*>(PaneRefreshWatcomThunk)},
       {"VESA mode check", 0x4F112, {0x55, 0x8B, 0xEC, 0x53, 0x56, 0x57, 0x06, 0x9C}, 8,
        reinterpret_cast<void*>(VesaModeSupported)},
   };
