@@ -12,7 +12,7 @@ DOS 4X space strategy game — no DOSBox required.
 | Phase | What | State |
 |---|---|---|
 | 0 | Tooling: archive/sprite readers, LE executable loader core, Ghidra pipeline | **in progress** |
-| 1 | Native runner: original game code runs directly on the CPU, DOS/VGA/sound replaced by Windows/SDL | **started** — reaches `main()`, loads archives; video next |
+| 1 | Native runner: original game code runs directly on the CPU, DOS/VGA/sound replaced by Windows/SDL | **in progress** — menus, new game and star map run natively; no sound yet |
 | 1.5 | Smarter AI (not harder — no extra cheats), borderless fullscreen, filters, 16:9 | planned |
 | 2 | Full C++ source port, original executable no longer needed | long-term |
 
@@ -22,8 +22,13 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
 ## What works today
 
 - `Ascendancy.exe` — the Phase 1 runner. Put it in your Ascendancy folder and
-  run it. Not playable yet: it currently runs the game's start-up and stops at
-  the first video-mode call, writing a report to `ascendancy.log`.
+  run it. Logo, main menu, new-game setup, species briefing, star map and
+  planet screens work with mouse and keyboard, borderless fullscreen by
+  default. Not yet: sound, intro movie verified, long play sessions.
+
+  Options: `--windowed`, `--smooth` (soft scaling), `Alt+Enter` toggles
+  fullscreen. Debug: `--trace`, `--trace-irq`, `--trace-vfx`, `--headless`,
+  `--shots <ms>`, `--script "<ms>:click:<x>:<y>,<ms>:key:<k>,<ms>:shot"`.
 
 - `ascx` — lists/extracts the COB archives and converts every sprite to PNG.
 - `ledump` — parses `ASCEND.EXE` (DOS/4GW LE format), applies its relocations

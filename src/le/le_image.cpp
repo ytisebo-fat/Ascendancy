@@ -39,8 +39,9 @@ bool LeImage::Parse(const std::vector<uint8_t>& d, std::string* error) {
   fixups_.clear();
   if (d.size() < 0x40 || d[0] != 'M' || d[1] != 'Z') return Fail(error, "not an MZ executable");
   uint32_t le = Le32(&d[0x3C]);
-  if (le + 0xAC > d.size() || d[le] != 'L' || d[le + 1] != 'E')
-    return Fail(error, "no LE header (is this the DOS/4GW game executable?)");
+  if (le + 0xAC > d.size() || d[le] != 'L' || (d[le + 1] != 'E' && d[le + 1] != 'X'))
+    return Fail(error, "no LE/LX header (is this the DOS/4GW game executable?)");
+  const bool lx = d[le + 1] == 'X';
   const uint8_t* h = &d[le];
   uint32_t numPages = Le32(h + 0x14);
   eipObject_ = Le32(h + 0x18) - 1;
@@ -48,7 +49,7 @@ bool LeImage::Parse(const std::vector<uint8_t>& d, std::string* error) {
   espObject_ = Le32(h + 0x20) - 1;
   esp_ = Le32(h + 0x24);
   uint32_t pageSize = Le32(h + 0x28);
-  uint32_t lastPageSize = Le32(h + 0x2C);
+  uint32_t lastPageSize = Le32(h + 0x2C);  // LX: page offset shift
   uint32_t objTable = le + Le32(h + 0x40);
   uint32_t objCount = Le32(h + 0x44);
   uint32_t pageMap = le + Le32(h + 0x48);
@@ -58,11 +59,17 @@ bool LeImage::Parse(const std::vector<uint8_t>& d, std::string* error) {
   if (objCount == 0 || objCount > 16 || pageSize == 0)
     return Fail(error, "implausible LE header");
 
-  // Page table: 4 bytes per page, 24-bit big-endian page number + flags.
+  // Page table. LE: 4 bytes per page, 24-bit big-endian page number + flags.
+  // LX: 8 bytes per page, u32 offset (<< shift) from data pages, u16 size, u16 flags.
   auto pageFileOffset = [&](uint32_t idx1) -> uint32_t {
+    if (lx) return dataPages + (Le32(&d[pageMap + (idx1 - 1) * 8]) << lastPageSize);
     const uint8_t* e = &d[pageMap + (idx1 - 1) * 4];
     uint32_t num = uint32_t(e[0]) << 16 | uint32_t(e[1]) << 8 | e[2];
     return dataPages + (num - 1) * pageSize;
+  };
+  auto pageDataSize = [&](uint32_t idx1) -> uint32_t {
+    if (lx) return Le16(&d[pageMap + (idx1 - 1) * 8 + 4]);
+    return idx1 == numPages ? lastPageSize : pageSize;
   };
 
   for (uint32_t i = 0; i < objCount; ++i) {
@@ -76,7 +83,7 @@ bool LeImage::Parse(const std::vector<uint8_t>& d, std::string* error) {
     obj.data.assign(obj.virtualSize, 0);
     for (uint32_t p = 0; p < obj.pageCount; ++p) {
       uint32_t idx = obj.pageIndex + p;
-      uint32_t sz = (idx == numPages) ? lastPageSize : pageSize;
+      uint32_t sz = pageDataSize(idx);
       uint32_t src = pageFileOffset(idx);
       uint32_t dst = p * pageSize;
       if (dst >= obj.virtualSize) break;

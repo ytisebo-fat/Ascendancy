@@ -1,6 +1,7 @@
 #include "runtime/dos.h"
 
 #include <cstdarg>
+#include <mmsystem.h>
 #include <cstdio>
 #include <cstring>
 #include <map>
@@ -9,6 +10,7 @@
 
 #include "runtime/game_image.h"
 #include "runtime/patches.h"
+#include "runtime/video.h"
 
 namespace asc {
 namespace {
@@ -55,7 +57,16 @@ constexpr uint32_t kDosArenaBase = 0x80000, kDosArenaSize = 0x20000;
 uint32_t g_dosArenaNext = 0;
 bool g_dosArenaOk = false;
 
-bool g_if = true;  // virtual interrupt flag (CLI/STI)
+volatile bool g_if = true;  // virtual interrupt flag (CLI/STI)
+
+// --- Hardware interrupt delivery (IRQ0 timer) ------------------------------
+HANDLE g_gameThread = nullptr;
+volatile LONG g_irqPending = 0;        // timer ticks waiting to be delivered
+volatile LONG g_pitDivisor = 65536;    // 1193182 Hz / divisor = tick rate
+bool g_pitHighNext = false;
+uint16_t g_pitLow = 0;
+uint8_t* g_iretStub = nullptr;         // "old handler" for unset vectors
+uint16_t g_codeSel = 0;
 int g_stepBudget = 0;  // --step N: single-step N instructions after each trap
 
 }  // namespace
@@ -180,19 +191,23 @@ void Int21(Regs& r) {
     case 0x1A: g_dta = r.edx(); break;       // set DTA
     case 0x2F: r.ebx() = g_dta; break;       // get DTA
     case 0x25: {                             // set interrupt vector
-      g_pmVectors[r.al()] = {g_flatDs, r.edx()};
+      g_pmVectors[r.al()] = {g_codeSel, r.edx()};
       Log("int21 set vector %02x -> %08x (orig %08x)", r.al(), r.edx(), g_image->Orig(r.edx()));
       break;
     }
-    case 0x35:  // get interrupt vector -> ES:EBX (ES unchanged; flat)
-      r.ebx() = g_pmVectors[r.al()].off;
+    case 0x35: {  // get interrupt vector -> ES:EBX
+      const Vector& v = g_pmVectors[r.al()];
+      r.ebx() = v.off ? v.off : uint32_t(uintptr_t(g_iretStub));
+      r.c->SegEs = v.off ? v.sel : g_codeSel;
       break;
+    }
     case 0x2A: {  // get date
       SYSTEMTIME st; GetLocalTime(&st);
       r.set_cx(st.wYear); r.set_dx(uint16_t(st.wMonth << 8 | st.wDay)); r.set_al(uint8_t(st.wDayOfWeek));
       break;
     }
-    case 0x2C: {  // get time
+    case 0x2C: {  // get time (games poll this in wait loops: keep the window alive)
+      video::Present();
       SYSTEMTIME st; GetLocalTime(&st);
       r.set_cx(uint16_t(st.wHour << 8 | st.wMinute));
       r.set_dx(uint16_t(st.wSecond << 8 | (st.wMilliseconds / 10)));
@@ -391,7 +406,12 @@ void Int31(Regs& r) {
     }
     case 0x0100: {  // allocate DOS memory: BX paragraphs -> AX segment, DX selector
       uint32_t bytes = (uint32_t(r.bx()) * 16 + 15) & ~15u;
-      if (!g_dosArenaOk || g_dosArenaNext + bytes > kDosArenaSize) {
+      // Conventional memory is only used for real-mode drivers (VESA BIOS,
+      // mouse handler, Sound Blaster driver), all of which the port replaces.
+      // Refusing it keeps behaviour identical on every system, and makes the
+      // game skip real-mode sound drivers cleanly (no sound until the native
+      // audio layer lands).
+      if (!g_cfg.allowDosMemory || !g_dosArenaOk || g_dosArenaNext + bytes > kDosArenaSize) {
         r.set_bx(uint16_t((kDosArenaSize - g_dosArenaNext) / 16));
         r.fail(8);
         break;
@@ -412,10 +432,12 @@ void Int31(Regs& r) {
     case 0x0201:
       g_rmVectors[r.bl()] = uint32_t(r.cx()) << 16 | r.dx();
       break;
-    case 0x0204:  // get PM vector -> CX:EDX
-      r.set_cx(g_pmVectors[r.bl()].sel ? g_pmVectors[r.bl()].sel : g_flatDs);
-      r.edx() = g_pmVectors[r.bl()].off;
+    case 0x0204: {  // get PM vector -> CX:EDX
+      const Vector& v = g_pmVectors[r.bl()];
+      r.set_cx(v.off ? v.sel : g_codeSel);
+      r.edx() = v.off ? v.off : uint32_t(uintptr_t(g_iretStub));
       break;
+    }
     case 0x0205:  // set PM vector
       g_pmVectors[r.bl()] = {r.cx(), r.edx()};
       Log("dpmi set PM vector %02x -> %08x (orig %08x)", r.bl(), r.edx(), g_image->Orig(r.edx()));
@@ -494,17 +516,36 @@ void Int31(Regs& r) {
 // INT 33h mouse, INT 16h keyboard, INT 10h video, INT 2Fh multiplex
 // (input/video are wired to the SDL front end in a later step)
 // ---------------------------------------------------------------------------
-struct MouseState { int x = 320, y = 240, buttons = 0; int minX = 0, maxX = 639, minY = 0, maxY = 479; };
-MouseState g_mouse;
+// The game sets the mouse range to 0..5112 x 0..3832 (8 units per pixel) and
+// divides by 8; ranges are tracked to convert from window pixels.
+struct MouseRange { int maxX = 639, maxY = 479; };
+MouseRange g_mouseRange;
+int ScaleX(int px) { return px * (g_mouseRange.maxX + 1) / 640; }
+int ScaleY(int py) { return py * (g_mouseRange.maxY + 1) / 480; }
+int UnscaleX(int v) { return v * 640 / (g_mouseRange.maxX + 1); }
+int UnscaleY(int v) { return v * 480 / (g_mouseRange.maxY + 1); }
+
+// Mirrors what the game's real-mode mouse handler stored at 0000:04F0.
+void SyncMouseToBios() {
+  video::Mouse m = video::GetMouseNoPump();
+  uint16_t v[3] = {uint16_t(m.buttons), uint16_t(ScaleX(m.x)), uint16_t(ScaleY(m.y))};
+  std::memcpy(LowMem() + 0x4F0, v, sizeof v);
+}
 
 void Int33(Regs& r) {
   switch (r.ax()) {
     case 0x0000: r.set_ax(0xFFFF); r.set_bx(2); break;  // reset: installed, 2 buttons
     case 0x0001: case 0x0002: break;                    // show/hide cursor
-    case 0x0003: r.set_bx(uint16_t(g_mouse.buttons)); r.set_cx(uint16_t(g_mouse.x)); r.set_dx(uint16_t(g_mouse.y)); break;
-    case 0x0004: g_mouse.x = r.cx(); g_mouse.y = r.dx(); break;
-    case 0x0007: g_mouse.minX = r.cx(); g_mouse.maxX = r.dx(); break;
-    case 0x0008: g_mouse.minY = r.cx(); g_mouse.maxY = r.dx(); break;
+    case 0x0003: {
+      video::Present();
+      video::Mouse m = video::GetMouse();
+      r.set_bx(uint16_t(m.buttons)); r.set_cx(uint16_t(ScaleX(m.x))); r.set_dx(uint16_t(ScaleY(m.y)));
+      break;
+    }
+    case 0x0004: video::WarpMouse(UnscaleX(r.cx()), UnscaleY(r.dx())); SyncMouseToBios(); break;
+    case 0x0007: g_mouseRange.maxX = r.dx() > 0 ? r.dx() : 639; break;
+    case 0x0008: g_mouseRange.maxY = r.dx() > 0 ? r.dx() : 479; break;
+    case 0x000F: break;  // mickey/pixel ratio
     case 0x000B: r.set_cx(0); r.set_dx(0); break;       // motion counters
     case 0x000C: Log("mouse event handler set: mask %04x -> %08x", r.cx(), r.edx()); break;
     default: if (g_cfg.traceInts) Log("int33 AX=%04x ignored", r.ax());
@@ -512,10 +553,19 @@ void Int33(Regs& r) {
 }
 
 void Int16(Regs& r) {
+  video::Present();
+  uint16_t key;
   switch (r.ah()) {
-    case 0x01: case 0x11: r.zf(true); break;   // no key waiting
-    case 0x00: case 0x10: r.set_ax(0x011B); break;  // (blocking read) -> ESC for now
-    case 0x02: case 0x12: r.set_al(0); break;
+    case 0x01: case 0x11:  // key waiting? ZF=1 none, else AX=key
+      if (video::PeekKey(&key)) { r.set_ax(key); r.zf(false); }
+      else r.zf(true);
+      break;
+    case 0x00: case 0x10:  // read key (blocking)
+      while (!video::PopKey(&key)) { video::Present(); Sleep(1); }
+      r.set_ax(key);
+      if (g_cfg.traceInts) Log("  key %04x", key);
+      break;
+    case 0x02: case 0x12: r.set_al(video::ShiftFlags()); break;
     default: if (g_cfg.traceInts) Log("int16 AH=%02x ignored", r.ah());
   }
 }
@@ -569,7 +619,18 @@ void PortOut(uint16_t port, uint32_t val, int size) {
       if (++g_dacPhase == 3) { g_dacPhase = 0; ++g_dacIndexW; }
       break;
     case 0x20: case 0xA0: break;  // PIC EOI
-    case 0x40: case 0x43: break;  // PIT programming
+    case 0x43:  // PIT mode/command: channel 0 load low+high byte follows
+      if ((val & 0xC0) == 0) g_pitHighNext = false;
+      break;
+    case 0x40:
+      if (!g_pitHighNext) { g_pitLow = uint8_t(val); g_pitHighNext = true; }
+      else {
+        uint32_t d = uint32_t(g_pitLow) | uint32_t(val & 0xFF) << 8;
+        g_pitHighNext = false;
+        InterlockedExchange(&g_pitDivisor, d ? LONG(d) : 65536);
+        Log("timer: %u Hz", unsigned(1193182 / (d ? d : 65536)));
+      }
+      break;
     default:
       if (g_cfg.traceInts) Log("out port %04x <- %x (size %d)", port, val, size);
   }
@@ -728,9 +789,85 @@ bool Emulate(CONTEXT* c) {
   return false;
 }
 
+// Delivers one pending timer tick by building the frame the CPU would push
+// for a hardware interrupt (EFLAGS, CS, EIP) and entering the game's IRQ0
+// handler. Only at instruction boundaries in game code with interrupts
+// virtually enabled - exactly when a real PC could take the interrupt.
+bool TryInjectIrq(CONTEXT* c) {
+  if (g_irqPending <= 0 || !g_if) return false;
+  const Vector& v = g_pmVectors[8];
+  if (!v.off || !g_image->IsCodeHost(c->Eip)) return false;
+  InterlockedDecrement(&g_irqPending);
+  static unsigned delivered = 0;
+  if (g_cfg.traceIrq && (++delivered % 200) == 1) {
+    Log("irq0: %u ticks delivered (EIP orig %08x) counter=%u busy=%d lock=%d us/tick=%u", delivered,
+        g_image->Orig(c->Eip), *g_image->Ptr<uint32_t>(0x122044), *g_image->Ptr<int32_t>(0x8893A),
+        *g_image->Ptr<int32_t>(0x8893E), *g_image->Ptr<uint32_t>(0x88936));
+    {
+      char buf[512]; int n = 0;
+      const uint32_t* sp = reinterpret_cast<const uint32_t*>(uintptr_t(c->Esp));
+      for (int i = 0; i < 400 && n < 480; ++i)
+        if (g_image->IsCodeHost(sp[i])) n += std::snprintf(buf + n, sizeof buf - n, " %05x", g_image->Orig(sp[i]));
+      Log("   callers:%s", buf);
+    }
+    for (int i = 0; i < 2; ++i) {
+      uint32_t st = g_image->Ptr<uint32_t>(0x887E8)[i];
+      if (st) Log("   timer %2d status %u period %u acc %u pending %u cb %08x", i, st,
+                  g_image->Ptr<uint32_t>(0x88868)[i], g_image->Ptr<uint32_t>(0x88828)[i],
+                  g_image->Ptr<uint32_t>(0x888A8)[i], g_image->Orig(g_image->Ptr<uint32_t>(0x887A8)[i]));
+    }
+  }
+  uint32_t* sp = reinterpret_cast<uint32_t*>(uintptr_t(c->Esp - 12));
+  sp[0] = c->Eip;
+  sp[1] = c->SegCs;
+  sp[2] = c->EFlags & ~0x100u;
+  c->Esp -= 12;
+  c->Eip = v.off;
+  c->EFlags &= ~0x100u;
+  return true;
+}
+
+// Timer thread: generates ticks at the programmed PIT rate; if the game
+// thread is running game code, sets its trap flag so the next instruction
+// boundary raises a single-step exception, where the tick is delivered.
+DWORD WINAPI TickerThread(void*) {
+  timeBeginPeriod(1);
+  LARGE_INTEGER freq, last, now;
+  QueryPerformanceFrequency(&freq);
+  QueryPerformanceCounter(&last);
+  double acc = 0;
+  for (;;) {
+    Sleep(1);
+    QueryPerformanceCounter(&now);
+    double period = double(g_pitDivisor) / 1193182.0;
+    acc += double(now.QuadPart - last.QuadPart) / double(freq.QuadPart);
+    last = now;
+    while (acc >= period) {
+      acc -= period;
+      if (g_pmVectors[8].off && g_irqPending < 8) InterlockedIncrement(&g_irqPending);
+    }
+    if (g_irqPending > 0 && g_if && g_pmVectors[8].off) {
+      if (SuspendThread(g_gameThread) == DWORD(-1)) continue;
+      CONTEXT ctx;
+      ctx.ContextFlags = CONTEXT_CONTROL;
+      if (GetThreadContext(g_gameThread, &ctx) && g_image->IsCodeHost(ctx.Eip) && !(ctx.EFlags & 0x100)) {
+        ctx.EFlags |= 0x100;
+        SetThreadContext(g_gameThread, &ctx);
+      }
+      ResumeThread(g_gameThread);
+    }
+  }
+}
+
 LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
   CONTEXT* c = ep->ContextRecord;
   DWORD code = ep->ExceptionRecord->ExceptionCode;
+  if (code == EXCEPTION_SINGLE_STEP && g_stepBudget == 0) {
+    // trap flag set by the timer thread: deliver the interrupt now
+    c->EFlags &= ~0x100u;
+    TryInjectIrq(c);
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   if (code == EXCEPTION_SINGLE_STEP && g_stepBudget > 0) {
     const uint8_t* p = reinterpret_cast<const uint8_t*>(uintptr_t(c->Eip));
     Log("step %08x (orig %08x) %02x %02x %02x %02x  eax=%08lx ebx=%08lx ecx=%08lx edx=%08lx esp=%08lx",
@@ -742,6 +879,7 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
   if (code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_PRIV_INSTRUCTION ||
       code == EXCEPTION_ILLEGAL_INSTRUCTION) {
     if (Emulate(c)) {
+      TryInjectIrq(c);
       if (g_cfg.stepAfterTrap > 0) { g_stepBudget = g_cfg.stepAfterTrap; c->EFlags |= 0x100; }
       return EXCEPTION_CONTINUE_EXECUTION;
     }
@@ -774,9 +912,15 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
 void DosInstall(GameImage* image, const DosConfig& cfg) {
   g_image = image;
   g_cfg = cfg;
-  uint16_t ds;
+  uint16_t ds, cs;
   __asm__ volatile("mov %%ds, %0" : "=r"(ds));
+  __asm__ volatile("mov %%cs, %0" : "=r"(cs));
   g_flatDs = ds;
+  g_codeSel = cs;
+  g_iretStub = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE));
+  g_iretStub[0] = 0xCF;  // iretd
+  DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_gameThread,
+                  THREAD_ALL_ACCESS, FALSE, 0);
 
   g_files.assign(5, DosFile{});
   g_files[0] = {GetStdHandle(STD_INPUT_HANDLE), true};
@@ -794,7 +938,9 @@ void DosInstall(GameImage* image, const DosConfig& cfg) {
   Log("low memory: DOS arena %s, VGA window %s", g_dosArenaOk ? "ok" : "UNAVAILABLE",
       vga ? "ok" : "UNAVAILABLE");
 
+  video::SetInputListener(SyncMouseToBios);
   AddVectoredExceptionHandler(1, VectoredHandler);
+  CreateThread(nullptr, 0, TickerThread, nullptr, 0, nullptr);
 }
 
 }  // namespace asc

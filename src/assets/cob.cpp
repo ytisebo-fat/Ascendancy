@@ -103,7 +103,10 @@ bool CobFileSystem::MountFromConfig(const std::string& gameDir, std::string* err
   if (!dir.empty() && dir.back() != '/' && dir.back() != '\\') dir += '/';
   FILE* f = std::fopen((dir + "cob.cfg").c_str(), "rb");
   if (!f) f = std::fopen((dir + "COB.CFG").c_str(), "rb");
-  if (!f) return SetError(error, "cannot open COB.CFG in " + gameDir), false;
+  if (!f)
+    return SetError(error, "cannot open COB.CFG in \"" + gameDir +
+                               "\" - give the Ascendancy game folder (the one with ASCEND00.COB)"),
+           false;
   char line[256];
   bool any = false;
   while (std::fgets(line, sizeof line, f)) {

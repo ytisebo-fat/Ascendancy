@@ -75,12 +75,60 @@ the surrounding code first. Hot paths (file reads, palette, blits, timers) are
 being moved to direct hooks — the original function's entry is replaced by a
 jump to C++ — which is also how game logic (e.g. the AI) gets replaced later.
 
+### Video: the VFX driver
+
+The game draws everything into its own 640×480 off-screen buffer and talks to
+the screen only through a Miles Design **VFX 3** driver, `VESA480.DLL` (an LX
+module loaded from the COB archive at run time). The driver is a table of 13
+cdecl functions, copied by `VFX_register_driver` (`0x571F1`) to `0x86A78`:
+
+| # | Function | Args |
+|---|---|---|
+| 0 | describe | → `{640, 480, 1, 256, 1, 1}` |
+| 1/2 | init / shutdown | |
+| 3 | area_wipe | x0, y0, x1, y1, colour |
+| 4/5 | wait_vblank_leading / wait_vblank | |
+| 6 | window_refresh | WINDOW*, x0, y0, x1, y1 (scales if sizes differ) |
+| 7 | window_read | WINDOW*, x0, y0, x1, y1 |
+| 8/9 | DAC_read / DAC_write | index, rgb[3] (6-bit) |
+| 10 | bank_reset | |
+| 11 | pane_refresh | PANE*, x0, y0, x1, y1 |
+| 12 | line_address | x, y, &ptr, &count |
+
+`runtime/vfx_driver.cpp` implements these on a linear framebuffer;
+`runtime/video.cpp` shows it with SDL2. The game's VESA mode check
+(`0x4F112`) is hooked to report mode 0x101 available, so UniVBE is never used.
+
+### Input
+
+- Mouse: the game registers an 18-byte real-mode callback with the mouse
+  driver that stores buttons/X/Y at `0000:04F0..04F5`, and its 60 Hz mouse poll
+  (`0x6053C`, an AIL timer callback) reads them. The installer (`0x5FFC1`) is
+  replaced by "return success", and the eight address constants are redirected
+  to a low-memory shadow that the port fills from SDL (X/Y × 8, as the game
+  sets an 8× mickey range).
+- Keyboard: Watcom `_bios_keybrd` → `int 16h` 01/00/02, fed from SDL key
+  events translated to PC scan codes + ASCII.
+
+### Timer interrupts
+
+The game installs a Miles AIL IRQ0 handler (`0x6F5CE`) driving 16 software
+timers (frame counter 100 Hz, mouse poll 60 Hz, …). A ticker thread runs at
+the PIT rate the game programs (ports 40h/43h) and sets the game thread's trap
+flag; at the next instruction boundary the exception handler pushes an
+interrupt frame (EFLAGS, CS, EIP) and enters the handler — only while the game
+has interrupts (virtually) enabled. Ticks are also delivered after every
+emulated instruction. Two patches were needed: the handler's private stacks
+are moved to 256 KB stacks (Windows exception frames overflowed the 2.5 KB
+DOS-era stack into the timer table), and chaining to the BIOS IRQ0 handler is
+skipped.
+
 ### Status of the runner
 
-Runs the full C runtime start-up and enters `main()`: reads `COB.CFG`, opens
-and indexes all three archives, allocates its 32 MB heap. Stops at the first
-VESA BIOS call (`int 10h AX=4F01` through DPMI `0300h`) — the next step is to
-replace the UniVBE/VESA layer with an SDL2 window.
+Logo → main menu → new game setup → species briefing → star map → planet
+screens run natively (tested under Wine; real-Windows test pending). No sound
+yet: real-mode memory (DPMI 0100h) is refused so the game skips its Sound
+Blaster drivers cleanly; the native audio layer (AIL digital API) is next.
 
 ## Tools
 

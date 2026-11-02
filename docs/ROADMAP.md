@@ -36,9 +36,9 @@ redirected:
 - [x] Loader: map code/data, apply relocations, set up runtime globals, call init + main
 - [~] Watcom C runtime: file I/O, memory, time → Win32 (emulated at the
       interrupt level; hot paths move to direct function hooks)
-- [ ] Video: UniVBE/VESA 640×480×8 → SDL2 window; palette → our renderer
-- [ ] Mouse (int 33h) and keyboard (int 16h / IRQ1) → SDL events
-- [ ] Timer (PIT/IRQ0) → high-resolution timer
+- [x] Video: the game's VFX driver (VESA480.DLL) replaced by a native one → SDL2 window, palette, borderless fullscreen
+- [x] Mouse (int 33h + real-mode handler at 0000:04F0) and keyboard (int 16h) → SDL events
+- [x] Timer (PIT/IRQ0) → ticker thread, interrupts delivered at instruction boundaries
 - [ ] Sound: Miles AIL 3.02 digital → SDL audio (VOC effects, RAW music)
 - [ ] FLC intro/cutscenes
 - [x] Safety net: unexpected `int`/port I/O caught and logged (ascendancy.log)

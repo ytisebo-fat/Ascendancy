@@ -17,6 +17,8 @@ class GameImage;
 struct DosConfig {
   std::string gameDir;      // directory holding ASCEND.EXE and the .COB files
   bool traceInts = false;   // log every emulated interrupt
+  bool traceIrq = false;
+  bool allowDosMemory = false;  // debug: hand out real-mode memory (DPMI 0100h)    // log timer interrupt delivery
   int stepAfterTrap = 0;    // debug: single-step this many instructions after each trap
 };
 

@@ -33,7 +33,7 @@ target_link_libraries(ledump PRIVATE asc_core)
 if(MINGW)
   # Single-file executables without MinGW runtime DLL dependencies.
   foreach(t ascx ledump)
-    target_link_options(${t} PRIVATE -static)
+    target_link_options(${t} PRIVATE -static -s)
   endforeach()
 endif()
 
@@ -49,9 +49,20 @@ if(WIN32)
     src/runtime/game_image.cpp
     src/runtime/dos.cpp
     src/runtime/patches.cpp
+    src/runtime/hooks.cpp
+    src/runtime/video.cpp
+    src/runtime/vfx_driver.cpp
   )
-  target_link_libraries(Ascendancy PRIVATE asc_core)
+  # SDL2 (static). Point SDL2_ROOT at the SDL2 MinGW development package's
+  # i686-w64-mingw32 directory.
+  set(SDL2_ROOT "" CACHE PATH "SDL2 MinGW dev root (…/SDL2-2.x/i686-w64-mingw32)")
+  if(NOT SDL2_ROOT)
+    message(FATAL_ERROR "Set -DSDL2_ROOT=<SDL2-2.x/i686-w64-mingw32>")
+  endif()
+  target_include_directories(Ascendancy PRIVATE ${SDL2_ROOT}/include/SDL2)
+  target_link_libraries(Ascendancy PRIVATE asc_core ${SDL2_ROOT}/lib/libSDL2.a
+    setupapi winmm imm32 version ole32 oleaut32 uuid gdi32 user32 shell32 advapi32 dinput8)
   # 16 MB stack: the game runs on the main thread's stack. Fixed image base
   # well above the low area the game image and DOS emulation use.
-  target_link_options(Ascendancy PRIVATE -static -Wl,--stack,16777216 -Wl,--image-base,0x20000000)
+  target_link_options(Ascendancy PRIVATE -static -s -Wl,--stack,16777216 -Wl,--image-base,0x20000000)
 endif()

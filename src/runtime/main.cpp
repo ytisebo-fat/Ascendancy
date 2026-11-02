@@ -16,6 +16,8 @@
 #include "runtime/dos.h"
 #include "runtime/game_image.h"
 #include "runtime/patches.h"
+#include "runtime/vfx_driver.h"
+#include "runtime/video.h"
 
 namespace {
 
@@ -96,10 +98,20 @@ void SetupRuntimeGlobals(GameImage& img, const std::string& gameDir) {
 int main(int argc, char** argv) {
   std::string gameDir = ExeDir();
   asc::DosConfig cfg;
+  asc::video::Config vcfg;
+  std::string script;
+  bool traceVfx = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--game") && i + 1 < argc) gameDir = argv[++i];
     else if (!std::strcmp(argv[i], "--trace")) cfg.traceInts = true;
     else if (!std::strcmp(argv[i], "--step") && i + 1 < argc) cfg.stepAfterTrap = std::atoi(argv[++i]);
+    else if (!std::strcmp(argv[i], "--trace-irq")) cfg.traceIrq = true;
+    else if (!std::strcmp(argv[i], "--trace-vfx")) traceVfx = true;
+    else if (!std::strcmp(argv[i], "--windowed")) vcfg.fullscreen = false;
+    else if (!std::strcmp(argv[i], "--smooth")) vcfg.smooth = true;
+    else if (!std::strcmp(argv[i], "--headless")) vcfg.headless = true;
+    else if (!std::strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
+    else if (!std::strcmp(argv[i], "--shots") && i + 1 < argc) vcfg.screenshotEveryMs = std::atoi(argv[++i]);
   }
   while (!gameDir.empty() && (gameDir.back() == '\\' || gameDir.back() == '/')) gameDir.pop_back();
   cfg.gameDir = gameDir;
@@ -125,12 +137,19 @@ int main(int argc, char** argv) {
     Log("  object %zu: orig %08x -> host %08x", i + 1, b, image.Host(b));
   }
 
-  if (!asc::ApplyPatches(image)) {
+  vcfg.screenshotDir = gameDir;
+  if (!asc::ApplyPatches(image) || !asc::InstallVfxDriver(image, traceVfx)) {
     MessageBoxA(nullptr, "This version of ASCEND.EXE is not supported yet (see ascendancy.log).",
                 "Ascendancy", MB_ICONERROR);
     return 1;
   }
   asc::DosInstall(&image, cfg);
+  if (!asc::video::Init(vcfg)) {
+    MessageBoxA(nullptr, "Could not open the game window (see ascendancy.log).", "Ascendancy",
+                MB_ICONERROR);
+    return 1;
+  }
+  if (!script.empty()) asc::video::SetInputScript(script);
   SetupRuntimeGlobals(image, gameDir);
   SetCurrentDirectoryA(gameDir.c_str());
 

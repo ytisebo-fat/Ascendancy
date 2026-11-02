@@ -93,7 +93,7 @@ bool WriteElf(const LeImage& le, const std::string& path) {
   strtab += '\0';
   std::vector<Elf32Sym> syms(2, Elf32Sym{});
   syms[1].name = 1;
-  syms[1].value = meta[le.entryObject()].preferredBase + le.entryOffset();
+  syms[1].value = le.entryObject() < meta.size() ? meta[le.entryObject()].preferredBase + le.entryOffset() : meta[0].preferredBase;
   syms[1].info = 0x12;  // GLOBAL FUNC
   syms[1].shndx = 1;
   while (out.size() % 4) out.push_back(0);
@@ -137,7 +137,7 @@ bool WriteElf(const LeImage& le, const std::string& path) {
   eh.type = 2;      // EXEC
   eh.machine = 3;   // i386
   eh.version = 1;
-  eh.entry = meta[le.entryObject()].preferredBase + le.entryOffset();
+  eh.entry = syms[1].value;
   eh.phoff = phoff;
   eh.shoff = shoff;
   eh.ehsize = sizeof(Elf32Ehdr);
@@ -169,8 +169,11 @@ int main(int argc, char** argv) {
     return 1;
   }
   const auto& objs = le.objects();
-  std::printf("entry: object %u + 0x%x  (linear 0x%x)\n", le.entryObject() + 1, le.entryOffset(),
-              objs[le.entryObject()].preferredBase + le.entryOffset());
+  if (le.entryObject() < objs.size())
+    std::printf("entry: object %u + 0x%x  (linear 0x%x)\n", le.entryObject() + 1, le.entryOffset(),
+                objs[le.entryObject()].preferredBase + le.entryOffset());
+  else
+    std::printf("entry: none (DLL)\n");
   std::printf("stack: object %u + 0x%x\n", le.stackObject() + 1, le.stackOffset());
   for (size_t i = 0; i < objs.size(); ++i)
     std::printf("object %zu: base 0x%08x size 0x%06x flags 0x%04x %s pages %u..%u\n", i + 1,
