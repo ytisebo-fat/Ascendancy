@@ -1,0 +1,24 @@
+# Build output
+/build*/
+/out/
+*.o
+*.obj
+
+# Original game data must never be committed - users supply their own copy.
+*.cob
+*.COB
+*.exe
+*.EXE
+*.dig
+*.DIG
+*.flc
+*.FLC
+*.gam
+*.GAM
+/gamedata/
+/extracted/
+
+# Reverse-engineering scratch (large, regenerated from the user's own exe)
+/re/work/
+*.gpr
+*.rep/
