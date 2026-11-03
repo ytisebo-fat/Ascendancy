@@ -172,7 +172,16 @@ void ClampMouse() {
   if (g_mouse.y >= kHeight) g_mouse.y = kHeight - 1;
 }
 
-bool OnMainMenu() { return g_screenQuery && g_screenQuery() == 0; }
+// The screen number is also 0 before the game has initialised its window
+// manager (start-up), so the main menu only counts once another screen (the
+// logo, 0xFFFF) has been seen.
+bool OnMainMenu() {
+  static bool started = false;
+  if (!g_screenQuery) return false;
+  int screen = g_screenQuery();
+  if (screen != 0) started = true;
+  return started && screen == 0;
+}
 
 void SaveSettings() {
   if (!g_cfg.settingsPath.empty()) g_settings.Save(g_cfg.settingsPath);
