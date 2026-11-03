@@ -32,6 +32,8 @@ Mouse g_mouse;
 uint16_t g_keys[64];
 int g_keyHead = 0, g_keyCount = 0;
 uint8_t g_shift = 0;
+uint8_t g_scriptShift = 0;          // shift held by a scripted help-click
+uint64_t g_helpShiftUntil = 0;      // right-click help: keep Shift reported until (us)
 bool g_warpPending = false;
 void (*g_inputListener)() = nullptr;
 
@@ -158,14 +160,25 @@ void ClampMouse() {
 void RunScriptLocked() {
   if (g_script.empty()) return;
   int64_t ms = int64_t((NowUs() - g_startUs) / 1000);
-  if (g_scriptRelease >= 0 && ms >= g_scriptRelease) { g_mouse.buttons = 0; g_scriptRelease = -1; }
+  if (g_scriptRelease >= 0 && ms >= g_scriptRelease) {
+    g_mouse.buttons = 0;
+    g_scriptRelease = -1;
+  }
+  if (g_scriptShift && g_scriptRelease < 0 && ms >= 0) {
+    static int64_t clearAt = -1;
+    if (clearAt < 0) clearAt = ms + 200;
+    if (ms >= clearAt) { g_scriptShift = 0; clearAt = -1; }
+  }
   for (auto& e : g_script) {
     if (e.done || ms < int64_t(e.atMs)) continue;
     e.done = true;
     if (e.kind == "move") { g_mouse.x = e.a; g_mouse.y = e.b; }
-    else if (e.kind == "click" || e.kind == "rclick") {
+    else if (e.kind == "click" || e.kind == "rclick" || e.kind == "sclick") {
       g_mouse.x = e.a; g_mouse.y = e.b;
-      g_mouse.buttons = e.kind == "click" ? 1 : 2;
+      // rclick goes through the same mapping as the real right button
+      bool help = e.kind == "sclick" || (e.kind == "rclick" && g_cfg.rightClickHelp);
+      g_mouse.buttons = (e.kind == "rclick" && !help) ? 2 : 1;
+      if (help) g_scriptShift = 2;
       g_scriptRelease = ms + 150;
     } else if (e.kind == "key") {
       static const struct { const char* n; uint16_t k; } kNamed[] = {
@@ -248,6 +261,12 @@ void HandleEvents() {
       case SDL_MOUSEBUTTONDOWN:
       case SDL_MOUSEBUTTONUP: {
         int bit = e.button.button == SDL_BUTTON_LEFT ? 1 : e.button.button == SDL_BUTTON_RIGHT ? 2 : 0;
+        if (bit == 2 && g_cfg.rightClickHelp) {
+          // Right-click = the game's "help-click" (Shift + left click): report
+          // the left button, with Shift held until shortly after release.
+          bit = 1;
+          g_helpShiftUntil = NowUs() + (e.type == SDL_MOUSEBUTTONDOWN ? 3600000000ull : 200000);
+        }
         if (e.type == SDL_MOUSEBUTTONDOWN) g_mouse.buttons |= bit; else g_mouse.buttons &= ~bit;
         g_mouse.x = e.button.x;
         g_mouse.y = e.button.y;
@@ -273,6 +292,7 @@ void HandleEvents() {
   SDL_Keymod m = SDL_GetModState();
   g_shift = uint8_t(((m & KMOD_RSHIFT) ? 1 : 0) | ((m & KMOD_LSHIFT) ? 2 : 0) |
                     ((m & KMOD_CTRL) ? 4 : 0) | ((m & KMOD_ALT) ? 8 : 0));
+  if (NowUs() < g_helpShiftUntil) g_shift |= 2;
   RunScriptLocked();
   ClampMouse();
   if (g_warpPending) {
@@ -486,7 +506,7 @@ bool PopKey(uint16_t* key) {
   return true;
 }
 
-uint8_t ShiftFlags() { return g_shift; }
+uint8_t ShiftFlags() { return uint8_t(g_shift | g_scriptShift); }
 
 void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_t>& mask, int w,
                     int h, int offX, int offY) {

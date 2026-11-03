@@ -26,8 +26,11 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   planet screens work with mouse and keyboard, borderless fullscreen by
   default. Not yet: sound, intro movie verified, long play sessions.
 
-  Options: `--windowed`, `--smooth` (soft scaling), `Alt+Enter` toggles
-  fullscreen. Debug: `--trace`, `--trace-irq`, `--trace-vfx`, `--headless`,
+  Right-click anything for the game's built-in help popup (the original
+  "help-click", Shift+click, still works too).
+
+  Options: `--windowed`, `--smooth` (soft scaling), `--no-right-help`,
+  `Alt+Enter` toggles fullscreen. Debug: `--trace`, `--trace-irq`, `--trace-vfx`, `--headless`,
   `--shots <ms>`, `--script "<ms>:click:<x>:<y>,<ms>:key:<k>,<ms>:shot"`.
 
 - `ascx` — lists/extracts the COB archives and converts every sprite to PNG.

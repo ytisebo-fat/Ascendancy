@@ -17,6 +17,7 @@ constexpr int kWidth = 640, kHeight = 480;
 struct Config {
   bool fullscreen = true;         // borderless fullscreen (desktop resolution)
   bool smooth = false;            // linear filtering instead of sharp pixels
+  bool rightClickHelp = true;     // right mouse button = the game's help-click (Shift+click)
   bool headless = false;          // no window (testing); frames only via screenshots
   int screenshotEveryMs = 0;      // testing: dump frames as PNG at this interval
   std::string screenshotDir = ".";

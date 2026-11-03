@@ -109,6 +109,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--trace-vfx")) traceVfx = true;
     else if (!std::strcmp(argv[i], "--windowed")) vcfg.fullscreen = false;
     else if (!std::strcmp(argv[i], "--smooth")) vcfg.smooth = true;
+    else if (!std::strcmp(argv[i], "--no-right-help")) vcfg.rightClickHelp = false;
     else if (!std::strcmp(argv[i], "--headless")) vcfg.headless = true;
     else if (!std::strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
     else if (!std::strcmp(argv[i], "--shots") && i + 1 < argc) vcfg.screenshotEveryMs = std::atoi(argv[++i]);

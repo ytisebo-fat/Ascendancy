@@ -67,6 +67,12 @@ these can land before the full source port:
      time, keeping the same rules and no cheats. Compare against the original
      AI with the harness.
   4. Option in the menu: *Original AI* / *Improved AI*.
+- **Help:** right-click = the game's help-click (done). Later: hover
+  tooltips — a short one-line summary from the same help texts after a
+  short hover delay, once the window manager's hit-testing is mapped.
+- **Sound variety:** the original plays the same click sound for every
+  button; once audio is in, optionally vary it (per-button sounds or slight
+  pitch/volume variation).
 - The Antagonizer (`ANTAG.EXE`) can be supported by the same runner if wanted.
 
 ## Phase 2 — full source port
