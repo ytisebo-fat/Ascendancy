@@ -29,9 +29,15 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   Right-click anything for the game's built-in help popup (the original
   "help-click", Shift+click, still works too).
 
-  Options: `--windowed`, `--smooth` (soft scaling), `--no-right-help`,
+  **Options panel:** the *Options* button on the main menu, or **F12** at any
+  time: fullscreen/window, picture filter (Crisp, Sharp pixels, Soft, Smooth
+  art, CRT monitor), right-click behaviour. Saved to `ascendancy.ini`.
+
+  Command line (overrides the ini for one session): `--windowed`,
+  `--fullscreen`, `--filter sharp|crisp|soft|smooth|crt`, `--no-right-help`.
   `Alt+Enter` toggles fullscreen. Debug: `--trace`, `--trace-irq`, `--trace-vfx`, `--headless`,
-  `--shots <ms>`, `--script "<ms>:click:<x>:<y>,<ms>:key:<k>,<ms>:shot"`.
+  `--shots <ms>`, `--script "<ms>:click:<x>:<y>,<ms>:key:<k>,<ms>:shot,<ms>:winshot"`
+  (with `SDL_VIDEODRIVER=offscreen` the full window can be tested without a display).
 
 - `ascx` — lists/extracts the COB archives and converts every sprite to PNG.
 - `ledump` — parses `ASCEND.EXE` (DOS/4GW LE format), applies its relocations

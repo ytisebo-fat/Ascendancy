@@ -52,8 +52,11 @@ redirected:
 Because each original function can be swapped for a C++ one individually,
 these can land before the full source port:
 
-- **Filters (GPU shaders):** sharp-bilinear, smooth bilinear, xBR/ScaleFX-style
-  pixel-art upscaler, CRT/scanlines. Selectable in an options menu.
+- **Options panel** (done): main-menu button + F12, in the game's style and
+  font; settings in `ascendancy.ini`.
+- **Filters** (done): Crisp (sharp-bilinear, default), Sharp pixels, Soft,
+  Smooth art (Scale2x on palette indices), CRT scanlines. Possible later:
+  GPU shader filters (xBR/ScaleFX, curved CRT) if a shader backend is added.
 - **16:9:** first, a 16:9 frame around the 4:3 game (ambient star-field side
   panels instead of black bars). Then real widescreen layouts for the main
   screens (star map, solar system, planet view) once their drawing code is

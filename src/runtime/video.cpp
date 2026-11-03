@@ -7,42 +7,49 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 
+#include "assets/font.h"
 #include "common/png_write.h"
 #include "runtime/dos.h"
+#include "runtime/options_ui.h"
 
 namespace asc::video {
 uint32_t g_debugOffscreenWindowHost = 0;
+uint32_t (*g_debugPeek)(uint32_t origAddr) = nullptr;
 namespace {
 
 // ---------------------------------------------------------------------------
 // Shared state. The game thread writes the framebuffer/palette without locks
 // (the render thread may show a half-updated frame - exactly what a VGA card
-// scanning out video memory does). Input and cursor data use a lock.
+// scanning out video memory does). Input, cursor and settings use a lock.
 // ---------------------------------------------------------------------------
 Config g_cfg;
+Settings g_settings;
 uint8_t g_fb[kWidth * kHeight];
 uint8_t g_pal6[256 * 3];
 uint32_t g_pal32[256];
-std::atomic<bool> g_dirty{true};
 
-CRITICAL_SECTION g_lock;   // mouse, keys, cursor image
-Mouse g_mouse;
+CRITICAL_SECTION g_lock;
+Mouse g_mouse;            // what the game sees
 uint16_t g_keys[64];
 int g_keyHead = 0, g_keyCount = 0;
 uint8_t g_shift = 0;
-uint8_t g_scriptShift = 0;          // shift held by a scripted help-click
-uint64_t g_helpShiftUntil = 0;      // right-click help: keep Shift reported until (us)
+uint8_t g_scriptShift = 0;
+uint64_t g_helpShiftUntil = 0;
 bool g_warpPending = false;
 void (*g_inputListener)() = nullptr;
 
 struct Cursor {
   std::vector<uint8_t> pix, mask;
   int w = 0, h = 0, offX = 0, offY = 0;
+  int version = 0;
 };
 Cursor g_cursor;
+Cursor g_arrow;           // the game's arrow pointer, used over the options panel
 bool (*g_cursorVisible)() = nullptr;
+int (*g_screenQuery)() = nullptr;
 
 uint64_t g_startUs = 0, g_lastShot = 0, g_lastVblank = 0;
 int g_shotIndex = 0;
@@ -52,6 +59,15 @@ bool g_renderOk = false;
 struct ScriptEvent { uint64_t atMs; std::string kind; int a = 0, b = 0; std::string key; bool done = false; };
 std::vector<ScriptEvent> g_script;
 int64_t g_scriptRelease = -1;
+int g_scriptReleaseButton = 0;
+std::string g_winshotPath;
+
+// Options panel (render thread)
+FntFont g_bigFont, g_smallFont;
+ui::OptionsPanel g_panel;
+bool g_uiDirty = true;
+bool g_menuButtonHover = false;
+bool g_swallowRelease = false;   // the press was consumed by the port's UI
 
 struct Lock {
   Lock() { EnterCriticalSection(&g_lock); }
@@ -156,15 +172,93 @@ void ClampMouse() {
   if (g_mouse.y >= kHeight) g_mouse.y = kHeight - 1;
 }
 
+bool OnMainMenu() { return g_screenQuery && g_screenQuery() == 0; }
+
+void SaveSettings() {
+  if (!g_cfg.settingsPath.empty()) g_settings.Save(g_cfg.settingsPath);
+}
+
+// Forward declarations (render thread)
+void ApplyFullscreen();
+
+// ---------------------------------------------------------------------------
+// Input routing, shared by real events and scripted input. Caller holds g_lock.
+// The port's UI (Options button / panel) gets first pick; everything else
+// goes to the game.
+// ---------------------------------------------------------------------------
+void OnPointerMove(int x, int y) {
+  g_mouse.x = x;
+  g_mouse.y = y;
+  ClampMouse();
+  if (g_panel.open()) {
+    if (g_panel.OnMove(g_mouse.x, g_mouse.y)) g_uiDirty = true;
+  } else {
+    bool h = OnMainMenu() && ui::OptionsPanel::MenuButton().Contains(g_mouse.x, g_mouse.y);
+    if (h != g_menuButtonHover) { g_menuButtonHover = h; g_uiDirty = true; }
+  }
+}
+
+void OnPointerButton(bool down, int sdlButton) {
+  if (down && sdlButton == SDL_BUTTON_LEFT) {
+    if (g_panel.open()) {
+      ui::Action a = g_panel.OnClick(g_mouse.x, g_mouse.y, g_settings);
+      if (a == ui::Action::kClose) g_panel.Close();
+      if (a == ui::Action::kChanged) { SaveSettings(); ApplyFullscreen(); }
+      g_uiDirty = true;
+      g_swallowRelease = true;
+      return;
+    }
+    if (OnMainMenu() && ui::OptionsPanel::MenuButton().Contains(g_mouse.x, g_mouse.y) && g_panel.fontsOk()) {
+      g_panel.Open();
+      g_mouse.buttons = 0;
+      g_uiDirty = true;
+      g_swallowRelease = true;
+      return;
+    }
+  }
+  if (g_panel.open()) return;  // nothing reaches the game while the panel is open
+  if (!down && g_swallowRelease) { g_swallowRelease = false; return; }
+  int bit = sdlButton == SDL_BUTTON_LEFT ? 1 : sdlButton == SDL_BUTTON_RIGHT ? 2 : 0;
+  if (bit == 2 && g_settings.rightClickHelp) {
+    // Right-click = the game's "help-click" (Shift + left click): report the
+    // left button, with Shift held until shortly after release.
+    bit = 1;
+    g_helpShiftUntil = NowUs() + (down ? 3600000000ull : 200000);
+  }
+  if (down) g_mouse.buttons |= bit; else g_mouse.buttons &= ~bit;
+}
+
+// Returns true if the key was used by the port.
+bool OnKeyDown(const SDL_Keysym& ks) {
+  if (ks.sym == SDLK_RETURN && (ks.mod & KMOD_ALT)) {
+    g_settings.fullscreen = !g_settings.fullscreen;
+    SaveSettings();
+    ApplyFullscreen();
+    g_uiDirty = true;
+    return true;
+  }
+  if (ks.sym == SDLK_F12 && g_panel.fontsOk()) {
+    if (g_panel.open()) g_panel.Close(); else { g_panel.Open(); g_mouse.buttons = 0; }
+    g_uiDirty = true;
+    return true;
+  }
+  if (g_panel.open()) {
+    if (ks.sym == SDLK_ESCAPE) { g_panel.Close(); g_uiDirty = true; }
+    return true;  // the game gets no keys while the panel is open
+  }
+  if (uint16_t k = BiosKey(ks)) PushKey(k);
+  return false;
+}
+
 // Applies scripted input that is due. Caller holds g_lock.
 void RunScriptLocked() {
   if (g_script.empty()) return;
   int64_t ms = int64_t((NowUs() - g_startUs) / 1000);
   if (g_scriptRelease >= 0 && ms >= g_scriptRelease) {
-    g_mouse.buttons = 0;
+    OnPointerButton(false, g_scriptReleaseButton);
     g_scriptRelease = -1;
   }
-  if (g_scriptShift && g_scriptRelease < 0 && ms >= 0) {
+  if (g_scriptShift && g_scriptRelease < 0) {
     static int64_t clearAt = -1;
     if (clearAt < 0) clearAt = ms + 200;
     if (ms >= clearAt) { g_scriptShift = 0; clearAt = -1; }
@@ -172,39 +266,48 @@ void RunScriptLocked() {
   for (auto& e : g_script) {
     if (e.done || ms < int64_t(e.atMs)) continue;
     e.done = true;
-    if (e.kind == "move") { g_mouse.x = e.a; g_mouse.y = e.b; }
-    else if (e.kind == "click" || e.kind == "rclick" || e.kind == "sclick") {
-      g_mouse.x = e.a; g_mouse.y = e.b;
-      // rclick goes through the same mapping as the real right button
-      bool help = e.kind == "sclick" || (e.kind == "rclick" && g_cfg.rightClickHelp);
-      g_mouse.buttons = (e.kind == "rclick" && !help) ? 2 : 1;
-      if (help) g_scriptShift = 2;
+    if (e.kind == "move") {
+      OnPointerMove(e.a, e.b);
+    } else if (e.kind == "click" || e.kind == "rclick" || e.kind == "sclick") {
+      OnPointerMove(e.a, e.b);
+      if (e.kind == "sclick") g_scriptShift = 2;
+      g_scriptReleaseButton = e.kind == "rclick" ? SDL_BUTTON_RIGHT : SDL_BUTTON_LEFT;
+      OnPointerButton(true, g_scriptReleaseButton);
       g_scriptRelease = ms + 150;
     } else if (e.kind == "key") {
-      static const struct { const char* n; uint16_t k; } kNamed[] = {
-          {"esc", 0x011B}, {"enter", 0x1C0D}, {"space", 0x3920}, {"tab", 0x0F09},
-          {"up", 0x4800}, {"down", 0x5000}, {"left", 0x4B00}, {"right", 0x4D00}};
-      for (auto& n : kNamed) if (e.key == n.n) PushKey(n.k);
-      if (e.key.size() == 1) {
-        SDL_Keysym ks{};
-        ks.sym = SDL_Keycode(e.key[0]);
+      static const struct { const char* n; SDL_Keycode k; } kNamed[] = {
+          {"esc", SDLK_ESCAPE}, {"enter", SDLK_RETURN}, {"space", SDLK_SPACE}, {"tab", SDLK_TAB},
+          {"up", SDLK_UP}, {"down", SDLK_DOWN}, {"left", SDLK_LEFT}, {"right", SDLK_RIGHT},
+          {"f12", SDLK_F12}};
+      SDL_Keysym ks{};
+      ks.sym = 0;
+      for (auto& n : kNamed) if (e.key == n.n) ks.sym = n.k;
+      if (!ks.sym && e.key.size() == 1) ks.sym = SDL_Keycode(e.key[0]);
+      if (ks.sym) {
         ks.scancode = SDL_GetScancodeFromKey(ks.sym);
-        if (uint16_t k = BiosKey(ks)) PushKey(k);
+        OnKeyDown(ks);
       }
-    } else if (e.kind == "watchoff") {  // debug: watch offscreen pixel (a,b) of window at 0xC84F8
+    } else if (e.kind == "shot") {
+      char name[64];
+      std::snprintf(name, sizeof name, "\\script_%05llu.png", (unsigned long long)e.atMs);
+      SaveScreenshot(g_cfg.screenshotDir + name);
+    } else if (e.kind == "winshot") {  // the rendered window, as the player sees it
+      char name[64];
+      std::snprintf(name, sizeof name, "\\win_%05llu.png", (unsigned long long)e.atMs);
+      g_winshotPath = g_cfg.screenshotDir + name;
+    } else if (e.kind == "peek") {
+      uint32_t a = uint32_t(std::strtoul(e.key.c_str(), nullptr, 16));
+      if (g_debugPeek) Log("peek %08x = %08x", a, g_debugPeek(a));
+    } else if (e.kind == "watchoff") {
       uint32_t buf = *reinterpret_cast<uint32_t*>(uintptr_t(g_debugOffscreenWindowHost));
       DosSetWatch(buf + uint32_t(e.b) * 640 + uint32_t(e.a));
-    } else if (e.kind == "fbshot") {  // framebuffer only, no pointer overlay
+    } else if (e.kind == "fbshot") {
       bool (*saved)() = g_cursorVisible;
       g_cursorVisible = nullptr;
       char name[64];
       std::snprintf(name, sizeof name, "\\fb_%05llu.png", (unsigned long long)e.atMs);
       SaveScreenshot(g_cfg.screenshotDir + name);
       g_cursorVisible = saved;
-    } else if (e.kind == "shot") {
-      char name[64];
-      std::snprintf(name, sizeof name, "\\script_%05llu.png", (unsigned long long)e.atMs);
-      SaveScreenshot(g_cfg.screenshotDir + name);
     } else if (e.kind == "quit") {
       Log("script: quit");
       ExitProcess(0);
@@ -217,77 +320,112 @@ void RunScriptLocked() {
 // ---------------------------------------------------------------------------
 SDL_Window* g_window = nullptr;
 SDL_Renderer* g_renderer = nullptr;
-SDL_Texture* g_texture = nullptr;
+SDL_Texture* g_tex = nullptr;      // 640x480 game image
+SDL_Texture* g_texBig = nullptr;   // 1280x960 Scale2x image
+SDL_Texture* g_target = nullptr;   // integer pre-scale (Crisp / CRT)
+int g_targetScale = 0;
+SDL_Texture* g_scan = nullptr;     // scanline overlay
+SDL_Texture* g_uiTex = nullptr;    // options panel / button layer
+SDL_Texture* g_ptrTex = nullptr;
+int g_ptrVersion = -1, g_ptrW = 0, g_ptrH = 0, g_ptrOffX = 0, g_ptrOffY = 0;
+bool g_ptrIsArrow = false;
+SDL_Rect g_dst{0, 0, kWidth, kHeight};   // picture area in output pixels
+int g_outW = kWidth, g_outH = kHeight, g_winW = kWidth, g_winH = kHeight;
+uint8_t g_lastFb[kWidth * kHeight];
+uint32_t g_lastPal[256];
+bool g_imageDirty = true;
+Filter g_builtFilter = Filter::kCount;
+uint32_t g_uiPixels[kWidth * kHeight];
+bool g_uiVisible = false;
+bool g_confineDirty = true;
 
-bool confineDirty = true;
-
-// In fullscreen the 4:3 picture has black bars at the sides. Keep the OS
-// mouse inside the picture: otherwise it can wander into a bar while the game
-// pointer stays clamped at the edge, and seems to stick there when moving back.
-// (Windowed mode leaves the mouse free so it can reach other windows.)
-void UpdateMouseConfinement() {
+void ApplyFullscreen() {
+  if (!g_window) return;
   bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
-  if (!fs) {
+  if (fs != g_settings.fullscreen)
+    SDL_SetWindowFullscreen(g_window, g_settings.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+  g_confineDirty = true;
+  g_imageDirty = true;
+}
+
+// 4:3 picture, as large as fits, centred (black bars elsewhere).
+void UpdateLayout() {
+  SDL_GetRendererOutputSize(g_renderer, &g_outW, &g_outH);
+  SDL_GetWindowSize(g_window, &g_winW, &g_winH);
+  int w = g_outW, h = g_outW * 3 / 4;
+  if (h > g_outH) { h = g_outH; w = g_outH * 4 / 3; }
+  g_dst = {(g_outW - w) / 2, (g_outH - h) / 2, w, h};
+}
+
+// Window coordinates (mouse events) -> game coordinates.
+void WindowToGame(int wx, int wy, int* gx, int* gy) {
+  double px = double(wx) * g_outW / (g_winW ? g_winW : 1);
+  double py = double(wy) * g_outH / (g_winH ? g_winH : 1);
+  *gx = int((px - g_dst.x) * kWidth / (g_dst.w ? g_dst.w : 1));
+  *gy = int((py - g_dst.y) * kHeight / (g_dst.h ? g_dst.h : 1));
+}
+
+void GameToWindow(int gx, int gy, int* wx, int* wy) {
+  double px = g_dst.x + (gx + 0.5) * g_dst.w / kWidth;
+  double py = g_dst.y + (gy + 0.5) * g_dst.h / kHeight;
+  *wx = int(px * g_winW / (g_outW ? g_outW : 1));
+  *wy = int(py * g_winH / (g_outH ? g_outH : 1));
+}
+
+// In fullscreen keep the OS mouse inside the picture: otherwise it can
+// wander into a black bar while the pointer stays clamped at the edge, and
+// seems to stick there when moving back. Windowed mode leaves it free.
+void UpdateMouseConfinement() {
+  if (!(SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP)) {
     SDL_SetWindowMouseRect(g_window, nullptr);
     return;
   }
   int x0, y0, x1, y1;
-  SDL_RenderLogicalToWindow(g_renderer, 0.0f, 0.0f, &x0, &y0);
-  SDL_RenderLogicalToWindow(g_renderer, float(kWidth), float(kHeight), &x1, &y1);
-  SDL_Rect r{x0, y0, x1 - x0, y1 - y0};
+  GameToWindow(0, 0, &x0, &y0);
+  GameToWindow(kWidth - 1, kHeight - 1, &x1, &y1);
+  SDL_Rect r{x0, y0, x1 - x0 + 1, y1 - y0 + 1};
   if (r.w > 0 && r.h > 0) SDL_SetWindowMouseRect(g_window, &r);
-}
-
-void ToggleFullscreen() {
-  bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
-  SDL_SetWindowFullscreen(g_window, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-  confineDirty = true;
 }
 
 void HandleEvents() {
   SDL_Event e;
-  bool any = false;
   Lock lock;
   while (SDL_PollEvent(&e)) {
     switch (e.type) {
       case SDL_QUIT:
         Log("window closed - exiting");
         ExitProcess(0);
-      case SDL_MOUSEMOTION:
-        g_mouse.x = e.motion.x;
-        g_mouse.y = e.motion.y;
-        any = true;
+      case SDL_MOUSEMOTION: {
+        int gx, gy;
+        WindowToGame(e.motion.x, e.motion.y, &gx, &gy);
+        OnPointerMove(gx, gy);
         break;
+      }
       case SDL_MOUSEBUTTONDOWN:
       case SDL_MOUSEBUTTONUP: {
-        int bit = e.button.button == SDL_BUTTON_LEFT ? 1 : e.button.button == SDL_BUTTON_RIGHT ? 2 : 0;
-        if (bit == 2 && g_cfg.rightClickHelp) {
-          // Right-click = the game's "help-click" (Shift + left click): report
-          // the left button, with Shift held until shortly after release.
-          bit = 1;
-          g_helpShiftUntil = NowUs() + (e.type == SDL_MOUSEBUTTONDOWN ? 3600000000ull : 200000);
-        }
-        if (e.type == SDL_MOUSEBUTTONDOWN) g_mouse.buttons |= bit; else g_mouse.buttons &= ~bit;
-        g_mouse.x = e.button.x;
-        g_mouse.y = e.button.y;
-        any = true;
+        int gx, gy;
+        WindowToGame(e.button.x, e.button.y, &gx, &gy);
+        OnPointerMove(gx, gy);
+        OnPointerButton(e.type == SDL_MOUSEBUTTONDOWN, e.button.button);
         break;
       }
       case SDL_KEYDOWN:
-        if (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)) { ToggleFullscreen(); break; }
-        if (uint16_t k = BiosKey(e.key.keysym)) PushKey(k);
+        OnKeyDown(e.key.keysym);
         break;
       case SDL_WINDOWEVENT:
-        if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
-          confineDirty = true;
+        if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+          g_confineDirty = true;
+          g_imageDirty = true;
+        }
+        break;
+      case SDL_RENDER_TARGETS_RESET:
+      case SDL_RENDER_DEVICE_RESET:
+        g_imageDirty = true;
+        g_targetScale = 0;
         break;
       default:
         break;
     }
-  }
-  if (confineDirty) {
-    confineDirty = false;
-    UpdateMouseConfinement();
   }
   SDL_Keymod m = SDL_GetModState();
   g_shift = uint8_t(((m & KMOD_RSHIFT) ? 1 : 0) | ((m & KMOD_LSHIFT) ? 2 : 0) |
@@ -295,45 +433,202 @@ void HandleEvents() {
   if (NowUs() < g_helpShiftUntil) g_shift |= 2;
   RunScriptLocked();
   ClampMouse();
+  // The Options button follows the game's screen.
+  bool uiVisible = g_panel.open() || OnMainMenu();
+  if (uiVisible != g_uiVisible) { g_uiVisible = uiVisible; g_uiDirty = true; }
   if (g_warpPending) {
     g_warpPending = false;
     int wx, wy;
-    SDL_RenderLogicalToWindow(g_renderer, float(g_mouse.x), float(g_mouse.y), &wx, &wy);
+    GameToWindow(g_mouse.x, g_mouse.y, &wx, &wy);
     SDL_WarpMouseInWindow(g_window, wx, wy);
   }
-  (void)any;
   if (g_inputListener) g_inputListener();
 }
 
-void DrawFrame() {
+// Scale2x (AdvMAME2x) on palette indices: exact comparisons, so it rounds
+// off the stair-steps of pixel art without blurring.
+void Scale2x(uint32_t* dst, int pitchPx) {
+  for (int y = 0; y < kHeight; ++y) {
+    const uint8_t* r0 = g_fb + (y > 0 ? y - 1 : y) * kWidth;
+    const uint8_t* r1 = g_fb + y * kWidth;
+    const uint8_t* r2 = g_fb + (y < kHeight - 1 ? y + 1 : y) * kWidth;
+    uint32_t* d0 = dst + (2 * y) * pitchPx;
+    uint32_t* d1 = d0 + pitchPx;
+    for (int x = 0; x < kWidth; ++x) {
+      int xl = x > 0 ? x - 1 : x, xr = x < kWidth - 1 ? x + 1 : x;
+      uint8_t B = r0[x], D = r1[xl], E = r1[x], F = r1[xr], H = r2[x];
+      uint8_t e0 = E, e1 = E, e2 = E, e3 = E;
+      if (B != H && D != F) {
+        if (D == B) e0 = D;
+        if (B == F) e1 = F;
+        if (D == H) e2 = D;
+        if (H == F) e3 = F;
+      }
+      d0[2 * x] = g_pal32[e0]; d0[2 * x + 1] = g_pal32[e1];
+      d1[2 * x] = g_pal32[e2]; d1[2 * x + 1] = g_pal32[e3];
+    }
+  }
+}
+
+void UploadGameImage() {
   void* pixels;
   int pitch;
-  if (SDL_LockTexture(g_texture, nullptr, &pixels, &pitch) != 0) return;
+  if (g_settings.filter == Filter::kSmooth) {
+    if (!g_texBig) {
+      g_texBig = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+                                   kWidth * 2, kHeight * 2);
+      SDL_SetTextureScaleMode(g_texBig, SDL_ScaleModeLinear);
+    }
+    if (g_texBig && SDL_LockTexture(g_texBig, nullptr, &pixels, &pitch) == 0) {
+      Scale2x(static_cast<uint32_t*>(pixels), pitch / 4);
+      SDL_UnlockTexture(g_texBig);
+    }
+    return;
+  }
+  if (SDL_LockTexture(g_tex, nullptr, &pixels, &pitch) != 0) return;
   for (int y = 0; y < kHeight; ++y) {
     uint32_t* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pixels) + y * pitch);
     const uint8_t* src = g_fb + y * kWidth;
     for (int x = 0; x < kWidth; ++x) dst[x] = g_pal32[src[x]];
   }
-  // Mouse pointer overlay at the current mouse position.
-  if (g_cursorVisible && g_cursorVisible()) {
-    Lock lock;
-    const Cursor& c = g_cursor;
-    int x0 = g_mouse.x + c.offX, y0 = g_mouse.y + c.offY;
-    for (int y = 0; y < c.h; ++y) {
-      int sy = y0 + y;
-      if (sy < 0 || sy >= kHeight) continue;
-      uint32_t* dst = reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(pixels) + sy * pitch);
-      for (int x = 0; x < c.w; ++x) {
-        int sx = x0 + x;
-        if (sx < 0 || sx >= kWidth || !c.mask[y * c.w + x]) continue;
-        dst[sx] = g_pal32[c.pix[y * c.w + x]];
+  SDL_UnlockTexture(g_tex);
+}
+
+void DrawGameImage() {
+  switch (g_settings.filter) {
+    case Filter::kSharp:
+      SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeNearest);
+      SDL_RenderCopy(g_renderer, g_tex, nullptr, &g_dst);
+      break;
+    case Filter::kSoft:
+      SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeLinear);
+      SDL_RenderCopy(g_renderer, g_tex, nullptr, &g_dst);
+      break;
+    case Filter::kSmooth:
+      if (g_texBig) SDL_RenderCopy(g_renderer, g_texBig, nullptr, &g_dst);
+      break;
+    case Filter::kCrisp:
+    case Filter::kCrt: {
+      // "Sharp bilinear": enlarge by a whole number with hard pixels, then
+      // make the last, fractional step smoothly - sharp and even pixels.
+      int scale = g_dst.h / kHeight;
+      if (scale < 1) scale = 1;
+      if (scale != g_targetScale || !g_target) {
+        if (g_target) SDL_DestroyTexture(g_target);
+        g_target = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_TARGET,
+                                     kWidth * scale, kHeight * scale);
+        if (g_target) SDL_SetTextureScaleMode(g_target, SDL_ScaleModeLinear);
+        g_targetScale = scale;
+        g_imageDirty = true;
       }
+      if (!g_target) {  // no render-target support: fall back to soft
+        SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeLinear);
+        SDL_RenderCopy(g_renderer, g_tex, nullptr, &g_dst);
+        break;
+      }
+      if (g_imageDirty) {
+        SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeNearest);
+        SDL_SetRenderTarget(g_renderer, g_target);
+        SDL_RenderCopy(g_renderer, g_tex, nullptr, nullptr);
+        SDL_SetRenderTarget(g_renderer, nullptr);
+      }
+      SDL_RenderCopy(g_renderer, g_target, nullptr, &g_dst);
+      if (g_settings.filter == Filter::kCrt) {
+        // Scanlines generated at the exact output height: each game line
+        // gets a bright centre and a darker gap (smooth cosine profile).
+        static int scanH = 0;
+        if (!g_scan || scanH != g_dst.h) {
+          if (g_scan) SDL_DestroyTexture(g_scan);
+          g_scan = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 1, g_dst.h);
+          scanH = g_dst.h;
+          if (g_scan) {
+            std::vector<uint32_t> rows(size_t(g_dst.h));
+            for (int y = 0; y < g_dst.h; ++y) {
+              double phase = (y + 0.5) * kHeight / g_dst.h;
+              phase -= int(phase);                        // 0..1 within a game line
+              // bright beam in the upper part of the line, dark gap below
+              double beam = std::exp(-((phase - 0.4) / 0.3) * ((phase - 0.4) / 0.3));
+              int a = int((1.0 - beam) * 170);            // gap darkness
+              rows[size_t(y)] = uint32_t(a) << 24;
+            }
+            SDL_UpdateTexture(g_scan, nullptr, rows.data(), 4);
+            SDL_SetTextureBlendMode(g_scan, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(g_scan, SDL_ScaleModeNearest);
+          }
+        }
+        if (g_scan) SDL_RenderCopy(g_renderer, g_scan, nullptr, &g_dst);
+      }
+      break;
     }
+    default:
+      break;
   }
-  SDL_UnlockTexture(g_texture);
+}
+
+SDL_Rect ToOutput(int gx, int gy, int gw, int gh) {
+  return {g_dst.x + gx * g_dst.w / kWidth, g_dst.y + gy * g_dst.h / kHeight,
+          (gx + gw) * g_dst.w / kWidth - gx * g_dst.w / kWidth,
+          (gy + gh) * g_dst.h / kHeight - gy * g_dst.h / kHeight};
+}
+
+void DrawPointer() {
+  bool overPanel = g_panel.open();
+  bool visible = overPanel || (g_cursorVisible && g_cursorVisible());
+  if (!visible) return;
+  const Cursor& c = (overPanel && g_arrow.w) ? g_arrow : g_cursor;
+  if (!c.w) return;
+  bool isArrow = &c == &g_arrow;
+  if (!g_ptrTex || g_ptrVersion != c.version || g_ptrIsArrow != isArrow) {
+    if (g_ptrTex) SDL_DestroyTexture(g_ptrTex);
+    g_ptrTex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, c.w, c.h);
+    if (!g_ptrTex) return;
+    std::vector<uint32_t> px(size_t(c.w) * c.h);
+    for (size_t i = 0; i < px.size(); ++i) px[i] = c.mask[i] ? g_pal32[c.pix[i]] : 0;
+    SDL_UpdateTexture(g_ptrTex, nullptr, px.data(), c.w * 4);
+    SDL_SetTextureBlendMode(g_ptrTex, SDL_BLENDMODE_BLEND);
+    SDL_SetTextureScaleMode(g_ptrTex, g_settings.filter == Filter::kSharp ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+    g_ptrVersion = c.version;
+    g_ptrIsArrow = isArrow;
+  }
+  SDL_Rect r = ToOutput(g_mouse.x + c.offX, g_mouse.y + c.offY, c.w, c.h);
+  SDL_RenderCopy(g_renderer, g_ptrTex, nullptr, &r);
+}
+
+void DrawFrame() {
+  UpdateLayout();
+  if (g_confineDirty) { g_confineDirty = false; UpdateMouseConfinement(); }
+  // Rebuild the picture only when the game changed it (or the filter did).
+  if (std::memcmp(g_lastFb, g_fb, sizeof g_fb) != 0 || std::memcmp(g_lastPal, g_pal32, sizeof g_pal32) != 0 ||
+      g_builtFilter != g_settings.filter) {
+    std::memcpy(g_lastFb, g_fb, sizeof g_fb);
+    std::memcpy(g_lastPal, g_pal32, sizeof g_pal32);
+    g_builtFilter = g_settings.filter;
+    g_imageDirty = true;
+    g_ptrVersion = -1;  // palette may have changed the pointer colours
+  }
+  if (g_imageDirty) UploadGameImage();
   SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
   SDL_RenderClear(g_renderer);
-  SDL_RenderCopy(g_renderer, g_texture, nullptr, nullptr);
+  DrawGameImage();
+  g_imageDirty = false;
+  {
+    Lock lock;
+    if (g_uiVisible) {
+      if (g_uiDirty) {
+        g_panel.Draw(g_uiPixels, g_settings, OnMainMenu(), g_menuButtonHover);
+        SDL_UpdateTexture(g_uiTex, nullptr, g_uiPixels, kWidth * 4);
+        g_uiDirty = false;
+      }
+      SDL_RenderCopy(g_renderer, g_uiTex, nullptr, &g_dst);
+    }
+    DrawPointer();
+  }
+  if (!g_winshotPath.empty()) {
+    std::vector<uint8_t> argb(size_t(g_outW) * g_outH * 4), rgba(argb.size());
+    if (SDL_RenderReadPixels(g_renderer, nullptr, SDL_PIXELFORMAT_ABGR8888, argb.data(), g_outW * 4) == 0)
+      WritePngRGBA(g_winshotPath, g_outW, g_outH, argb.data());
+    g_winshotPath.clear();
+  }
   SDL_RenderPresent(g_renderer);
 }
 
@@ -344,20 +639,24 @@ DWORD WINAPI RenderThread(void*) {
     SetEvent(g_renderReady);
     return 1;
   }
-  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, g_cfg.smooth ? "linear" : "nearest");
-  Uint32 flags = SDL_WINDOW_RESIZABLE | (g_cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+  Uint32 flags = SDL_WINDOW_RESIZABLE | (g_settings.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
   g_window = SDL_CreateWindow("Ascendancy", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                               kWidth * 2, kHeight * 2, flags);
   if (g_window) {
-    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+    g_renderer = SDL_CreateRenderer(g_window, -1,
+                                    SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE);
+    if (!g_renderer) g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE | SDL_RENDERER_TARGETTEXTURE);
     if (!g_renderer) g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
   }
   if (g_renderer) {
-    SDL_RenderSetLogicalSize(g_renderer, kWidth, kHeight);  // 4:3, letterboxed
-    g_texture = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
-                                  kWidth, kHeight);
+    g_tex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
+    g_uiTex = SDL_CreateTexture(g_renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, kWidth, kHeight);
+    if (g_uiTex) {
+      SDL_SetTextureBlendMode(g_uiTex, SDL_BLENDMODE_BLEND);
+      SDL_SetTextureScaleMode(g_uiTex, SDL_ScaleModeLinear);
+    }
   }
-  if (!g_texture) {
+  if (!g_tex || !g_uiTex) {
     Log("could not create the game window: %s", SDL_GetError());
     SetEvent(g_renderReady);
     return 1;
@@ -366,8 +665,8 @@ DWORD WINAPI RenderThread(void*) {
   SDL_RendererInfo info;
   SDL_GetRendererInfo(g_renderer, &info);
   bool vsync = info.flags & SDL_RENDERER_PRESENTVSYNC;
-  Log("video: SDL %s renderer%s, %s", info.name, vsync ? " (vsync)" : "",
-      g_cfg.fullscreen ? "borderless fullscreen" : "windowed");
+  Log("video: SDL %s renderer%s, %s, filter %s", info.name, vsync ? " (vsync)" : "",
+      g_settings.fullscreen ? "borderless fullscreen" : "windowed", FilterKey(g_settings.filter));
   g_renderOk = true;
   SetEvent(g_renderReady);
   for (;;) {
@@ -388,9 +687,14 @@ DWORD WINAPI RenderThread(void*) {
 // ---------------------------------------------------------------------------
 bool Init(const Config& cfg) {
   g_cfg = cfg;
+  g_settings = cfg.settings;
   g_startUs = NowUs();
   InitializeCriticalSection(&g_lock);
   for (int i = 0; i < 256; ++i) SetPalette(i, 0, 0, 0);
+  if (g_bigFont.Parse(cfg.bigFont) && g_smallFont.Parse(cfg.smallFont))
+    g_panel.SetFonts(&g_bigFont, &g_smallFont);
+  else
+    Log("options panel: game fonts not found - panel disabled");
   if (cfg.headless) {
     Log("video: headless");
     return true;
@@ -404,7 +708,7 @@ bool Init(const Config& cfg) {
 void Shutdown() {}
 
 uint8_t* Framebuffer() { return g_fb; }
-void MarkDirty() { g_dirty = true; }
+void MarkDirty() {}
 
 void SetPalette(int i, uint8_t r, uint8_t g, uint8_t b) {
   i &= 255;
@@ -453,7 +757,6 @@ bool SaveScreenshot(const std::string& path) {
     rgba[i * 4] = uint8_t(c >> 16); rgba[i * 4 + 1] = uint8_t(c >> 8);
     rgba[i * 4 + 2] = uint8_t(c); rgba[i * 4 + 3] = 255;
   }
-  // include the pointer overlay, as the player sees it
   if (g_cursorVisible && g_cursorVisible()) {
     Lock lock;
     const Cursor& c = g_cursor;
@@ -472,7 +775,8 @@ bool SaveScreenshot(const std::string& path) {
 Mouse GetMouse() {
   if (g_cfg.headless) Present();
   Lock lock;
-  return g_mouse;
+  Mouse m = g_mouse;
+  return m;
 }
 
 // Called from the input listener (lock already held by the caller thread).
@@ -509,7 +813,7 @@ bool PopKey(uint16_t* key) {
 uint8_t ShiftFlags() { return uint8_t(g_shift | g_scriptShift); }
 
 void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_t>& mask, int w,
-                    int h, int offX, int offY) {
+                    int h, int offX, int offY, int shape) {
   Lock lock;
   g_cursor.pix = pixels;
   g_cursor.mask = mask;
@@ -517,9 +821,12 @@ void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_
   g_cursor.h = h;
   g_cursor.offX = offX;
   g_cursor.offY = offY;
+  ++g_cursor.version;
+  if (shape == 0 && !g_arrow.w) { g_arrow = g_cursor; g_arrow.version = 1 << 30; }
 }
 
 void SetCursorVisibilityQuery(bool (*fn)()) { g_cursorVisible = fn; }
+void SetScreenQuery(int (*fn)()) { g_screenQuery = fn; }
 
 void SetInputScript(const std::string& script) {
   size_t pos = 0;

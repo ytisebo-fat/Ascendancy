@@ -17,6 +17,7 @@ add_library(asc_core STATIC
   src/assets/cob.cpp
   src/assets/palette.cpp
   src/assets/shp.cpp
+  src/assets/font.cpp
   src/le/le_image.cpp
 )
 target_include_directories(asc_core PUBLIC src)
@@ -52,6 +53,8 @@ if(WIN32)
     src/runtime/hooks.cpp
     src/runtime/video.cpp
     src/runtime/vfx_driver.cpp
+    src/runtime/settings.cpp
+    src/runtime/options_ui.cpp
   )
   # SDL2 (static). Point SDL2_ROOT at the SDL2 MinGW development package's
   # i686-w64-mingw32 directory.

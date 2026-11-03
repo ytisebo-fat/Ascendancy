@@ -83,7 +83,7 @@ void CaptureCursor() {
   draw(&pb, reinterpret_cast<void*>(uintptr_t(shapes)), frame, -hx, -hy);
   // Transparent where both differently-filled copies still show their fill.
   for (size_t i = 0; i < a.size(); ++i) mask[i] = !(a[i] == 0x00 && b[i] == 0xFF);
-  video::SetCursorImage(a, mask, w, h, hx, hy);
+  video::SetCursorImage(a, mask, w, h, hx, hy, frame);
   Log("pointer: shape %d (%dx%d, hotspot %d,%d)", frame, w, h, -hx, -hy);
 }
 

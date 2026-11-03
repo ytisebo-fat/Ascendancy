@@ -3,21 +3,24 @@
 //
 // The window lives on its own render thread: it shows the game's framebuffer
 // at the monitor refresh rate (vsync) independent of the game's own frame
-// rate, processes window/input events, and draws the mouse pointer as an
-// overlay at the current mouse position (no lag, no flicker). The game
-// thread only writes the framebuffer and palette.
+// rate, processes window/input events, applies the picture filter, and draws
+// the port's own layers on top: the options panel (F12 / main-menu button)
+// and the mouse pointer at the live mouse position. The game thread only
+// writes the framebuffer and palette.
 #include <cstdint>
 #include <string>
 #include <vector>
+
+#include "runtime/settings.h"
 
 namespace asc::video {
 
 constexpr int kWidth = 640, kHeight = 480;
 
 struct Config {
-  bool fullscreen = true;         // borderless fullscreen (desktop resolution)
-  bool smooth = false;            // linear filtering instead of sharp pixels
-  bool rightClickHelp = true;     // right mouse button = the game's help-click (Shift+click)
+  Settings settings;              // initial settings (from ascendancy.ini + command line)
+  std::string settingsPath;       // where the options panel saves changes ("" = don't save)
+  std::vector<uint8_t> bigFont, smallFont;  // game fonts (FNT) for the options panel
   bool headless = false;          // no window (testing); frames only via screenshots
   int screenshotEveryMs = 0;      // testing: dump frames as PNG at this interval
   std::string screenshotDir = ".";
@@ -47,7 +50,8 @@ struct Mouse { int x = 320, y = 240; int buttons = 0; };  // bit0 left, bit1 rig
 Mouse GetMouse();
 Mouse GetMouseNoPump();
 void WarpMouse(int x, int y);
-// Called (on the render thread) after input events were processed.
+// Called after input events were processed (render thread, or game thread
+// when headless).
 void SetInputListener(void (*fn)());
 
 // Keyboard, BIOS style: (scan code << 8) | ASCII.
@@ -55,12 +59,13 @@ bool PeekKey(uint16_t* key);
 bool PopKey(uint16_t* key);
 uint8_t ShiftFlags();   // bit0 right shift, 1 left shift, 2 ctrl, 3 alt
 
-// Mouse pointer overlay: image (palette indices + opacity mask) and the
-// offset of its top-left corner from the hotspot. `visibleFn` is polled by
-// the render thread each frame.
+// Mouse pointer overlay: image (palette indices + opacity mask), the offset
+// of its top-left corner from the hotspot, and the game's shape number.
 void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_t>& mask, int w,
-                    int h, int offX, int offY);
+                    int h, int offX, int offY, int shape);
 void SetCursorVisibilityQuery(bool (*visibleFn)());
+// Which game screen is showing (0 = main menu); used for the Options button.
+void SetScreenQuery(int (*screenFn)());
 
 // Testing aid: scripted input, e.g. "3000:click:320:293,6000:key:esc".
 void SetInputScript(const std::string& script);

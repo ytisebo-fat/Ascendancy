@@ -13,11 +13,15 @@
 #include <cstring>
 #include <string>
 
+#include "assets/cob.h"
 #include "runtime/dos.h"
+#include "runtime/settings.h"
 #include "runtime/game_image.h"
 #include "runtime/patches.h"
 #include "runtime/vfx_driver.h"
 #include "runtime/video.h"
+
+namespace asc::video { extern uint32_t (*g_debugPeek)(uint32_t); }
 
 namespace {
 
@@ -101,15 +105,19 @@ int main(int argc, char** argv) {
   asc::video::Config vcfg;
   std::string script;
   bool traceVfx = false;
+  bool forceWindowed = false, forceFullscreen = false, noRightHelp = false;
+  std::string forceFilter;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--game") && i + 1 < argc) gameDir = argv[++i];
     else if (!std::strcmp(argv[i], "--trace")) cfg.traceInts = true;
     else if (!std::strcmp(argv[i], "--step") && i + 1 < argc) cfg.stepAfterTrap = std::atoi(argv[++i]);
     else if (!std::strcmp(argv[i], "--trace-irq")) cfg.traceIrq = true;
     else if (!std::strcmp(argv[i], "--trace-vfx")) traceVfx = true;
-    else if (!std::strcmp(argv[i], "--windowed")) vcfg.fullscreen = false;
-    else if (!std::strcmp(argv[i], "--smooth")) vcfg.smooth = true;
-    else if (!std::strcmp(argv[i], "--no-right-help")) vcfg.rightClickHelp = false;
+    else if (!std::strcmp(argv[i], "--windowed")) forceWindowed = true;
+    else if (!std::strcmp(argv[i], "--fullscreen")) forceFullscreen = true;
+    else if (!std::strcmp(argv[i], "--smooth")) forceFilter = "soft";
+    else if (!std::strcmp(argv[i], "--filter") && i + 1 < argc) forceFilter = argv[++i];
+    else if (!std::strcmp(argv[i], "--no-right-help")) noRightHelp = true;
     else if (!std::strcmp(argv[i], "--headless")) vcfg.headless = true;
     else if (!std::strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
     else if (!std::strcmp(argv[i], "--shots") && i + 1 < argc) vcfg.screenshotEveryMs = std::atoi(argv[++i]);
@@ -139,6 +147,23 @@ int main(int argc, char** argv) {
   }
 
   vcfg.screenshotDir = gameDir;
+  // Settings: ascendancy.ini (written by the in-game options panel), with
+  // command-line options taking precedence for this session.
+  vcfg.settingsPath = gameDir + "\\ascendancy.ini";
+  vcfg.settings.Load(vcfg.settingsPath);
+  if (forceWindowed) vcfg.settings.fullscreen = false;
+  if (forceFullscreen) vcfg.settings.fullscreen = true;
+  if (noRightHelp) vcfg.settings.rightClickHelp = false;
+  for (int f = 0; f < int(asc::Filter::kCount); ++f)
+    if (forceFilter == asc::FilterKey(asc::Filter(f))) vcfg.settings.filter = asc::Filter(f);
+  {
+    asc::CobFileSystem fs;
+    std::string ferr;
+    if (fs.MountFromConfig(gameDir, &ferr)) {
+      fs.ReadFile("data\\bigfont.fnt", &vcfg.bigFont);
+      fs.ReadFile("data\\smfont.fnt", &vcfg.smallFont);
+    }
+  }
   if (!asc::ApplyPatches(image) || !asc::InstallVfxDriver(image, traceVfx)) {
     MessageBoxA(nullptr, "This version of ASCEND.EXE is not supported yet (see ascendancy.log).",
                 "Ascendancy", MB_ICONERROR);
@@ -151,6 +176,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (!script.empty()) asc::video::SetInputScript(script);
+  // Current game screen: u16 in the window manager object (0 = main menu).
+  asc::video::SetScreenQuery([] { return int(*image.Ptr<uint16_t>(0xFE584)); });
+  asc::video::g_debugPeek = [](uint32_t a) { return *image.Ptr<uint32_t>(a); };
   SetupRuntimeGlobals(image, gameDir);
   SetCurrentDirectoryA(gameDir.c_str());
 
