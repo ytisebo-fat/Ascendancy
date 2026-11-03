@@ -27,6 +27,8 @@ void DosInstall(GameImage* image, const DosConfig& cfg);
 
 // Debug: hardware write watchpoint on a host address.
 void DosSetWatch(uint32_t hostAddr);
+// Debug: dump the game's large heap blocks (u32 addr, u32 size, bytes...).
+void DosDumpHeap(const char* path);
 
 // Log to ascendancy.log (and stderr). printf-style.
 void Log(const char* fmt, ...);

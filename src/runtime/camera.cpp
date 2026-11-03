@@ -27,9 +27,12 @@
 extern "C" {
 uint32_t g_cosmosWnd = 0;         // last COSMOSWnd seen by its message handler
 uint32_t g_cosmosHandler = 0;     // host address of the original handler
+uint32_t g_batWnd = 0;            // last BatModeWnd (system view / battles)
+uint32_t g_batHandler = 0;
 uint32_t g_frameFunction = 0;     // host address of the original frame function
 void __cdecl CameraBeforeFrame();
 void CosmosHandlerThunk();
+void BatHandlerThunk();
 void FrameThunk();
 }
 
@@ -42,6 +45,18 @@ constexpr uint32_t kFrameCallSite = 0x1CC03;      // call 0x4FAA0 (per-frame)
 constexpr uint32_t kFrameFunction = 0x4FAA0;
 constexpr uint32_t kRotate = 0x23834, kZoom = 0x23878, kUpdateView = 0x2390C;
 constexpr uint32_t kRecenter = 0x21EEC;  // (window EAX): zoom 35, default orientation
+
+// System view / battles (BatModeWnd, screen 16; batmode.cpp handler 0x16348,
+// vtable entry 0x858F0). Messages 50/51 rotate, 54/55 zoom, 71 recentre; each
+// frame message 59 calls:
+//   0x17E50 rotate(window EAX, int degrees EDX)    (+-2 per frame)
+//   0x182B8 zoom(window EAX, EDX)                 (+-10 per frame)
+//   0x18C2C redraw(window EAX, 0)
+//   0x17F54 recentre(window EAX)
+constexpr uint32_t kBatHandlerSlot = 0x858F0, kBatHandler = 0x16348;
+constexpr uint32_t kBatRotate = 0x17E50, kBatZoom = 0x182B8, kBatRedraw = 0x18C2C, kBatRecenter = 0x17F54;
+constexpr int kScreenSystem = 16;
+constexpr int kBatZoomStep = 10;
 constexpr int kScreenStarMap = 1;
 
 GameImage* g_image = nullptr;
@@ -54,6 +69,9 @@ __asm__(
     "_CosmosHandlerThunk:\n"
     "  movl %eax, _g_cosmosWnd\n"
     "  jmp *_g_cosmosHandler\n"
+    "_BatHandlerThunk:\n"
+    "  movl %eax, _g_batWnd\n"
+    "  jmp *_g_batHandler\n"
     "_FrameThunk:\n"
     "  pushal\n"
     "  pushfl\n"
@@ -111,9 +129,46 @@ int g_zoomPending = 0;  // in zoom steps (1 unit each), applied one per frame
 
 using namespace asc;
 
+namespace {
+float g_batYaw = 0;  // fractional degrees not yet applied (system view rotates in whole degrees)
+
+void SystemViewFrame(const video::CameraInput& in) {
+  using namespace asc;
+  uint32_t w = g_batWnd;
+  g_zoomPending += in.zoomSteps;
+  if (g_zoomPending > 12) g_zoomPending = 12;
+  if (g_zoomPending < -12) g_zoomPending = -12;
+  bool changed = false;
+  if (in.recenter) {
+    CallWindowFn(g_image->Host(kBatRecenter), w);
+    g_zoomPending = 0;
+    g_batYaw = 0;
+    changed = true;
+  }
+  g_batYaw += in.yawDegrees;
+  int whole = int(g_batYaw);
+  if (whole != 0) {
+    CallWindowFn(g_image->Host(kBatRotate), w, uint32_t(whole));
+    g_batYaw -= float(whole);
+    changed = true;
+  }
+  if (g_zoomPending != 0) {
+    int dir = g_zoomPending > 0 ? 1 : -1;
+    CallWindowFn(g_image->Host(kBatZoom), w, uint32_t(dir * kBatZoomStep));
+    g_zoomPending -= dir;
+    changed = true;
+  }
+  if (changed) CallWindowFn(g_image->Host(kBatRedraw), w, 0);
+}
+}  // namespace
+
 extern "C" void __cdecl CameraBeforeFrame() {
   video::CameraInput in = video::TakeCameraInput();
   int screen = *g_image->Ptr<uint16_t>(0xFE584);
+  if (screen == kScreenSystem && g_batWnd) {
+    SystemViewFrame(in);
+    return;
+  }
   if (screen != kScreenStarMap || !g_cosmosWnd) {
     g_zoomPending = 0;
     return;
@@ -149,18 +204,22 @@ bool InstallCameraControls(GameImage& image) {
     return false;
   }
   uint32_t* slot = image.Ptr<uint32_t>(kCosmosHandlerSlot);
-  if (*slot != image.Host(kCosmosHandler)) {
-    Log("camera: COSMOSWnd vtable not as expected - camera controls disabled");
+  uint32_t* batSlot = image.Ptr<uint32_t>(kBatHandlerSlot);
+  if (*slot != image.Host(kCosmosHandler) || *batSlot != image.Host(kBatHandler)) {
+    Log("camera: window vtables not as expected - camera controls disabled");
     return false;
   }
   g_cosmosHandler = image.Host(kCosmosHandler);
+  g_batHandler = image.Host(kBatHandler);
   g_frameFunction = image.Host(kFrameFunction);
   *slot = uint32_t(uintptr_t(&CosmosHandlerThunk));
+  *batSlot = uint32_t(uintptr_t(&BatHandlerThunk));
   uint8_t* site = image.Ptr<uint8_t>(kFrameCallSite);
   int32_t newRel = int32_t(uintptr_t(&FrameThunk) - (uintptr_t(site) + 5));
   std::memcpy(site + 1, &newRel, 4);
   FlushInstructionCache(GetCurrentProcess(), site, 5);
-  video::SetCameraArea(7, 7, 465, 472, kScreenStarMap);
+  video::AddCameraArea(7, 7, 465, 472, kScreenStarMap);  // COSMOSWnd
+  video::AddCameraArea(7, 7, 465, 472, kScreenSystem);   // BatModeWnd
   return true;
 }
 

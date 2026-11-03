@@ -58,6 +58,7 @@ uint32_t g_dosArenaNext = 0;
 bool g_dosArenaOk = false;
 
 volatile bool g_if = true;  // virtual interrupt flag (CLI/STI)
+std::vector<std::pair<uint32_t, uint32_t>> g_bigBlocks;  // debug: game heap blocks (addr, size)
 
 // --- Hardware interrupt delivery (IRQ0 timer) ------------------------------
 HANDLE g_gameThread = nullptr;
@@ -477,6 +478,7 @@ void Int31(Regs& r) {
       uint32_t a = uint32_t(uintptr_t(m));
       r.set_bx(uint16_t(a >> 16)); r.set_cx(uint16_t(a));
       r.set_si(uint16_t(a >> 16)); r.set_di(uint16_t(a));
+      if (bytes >= 65536) g_bigBlocks.push_back({a, bytes});
       if (g_cfg.traceInts) Log("  dpmi alloc %u bytes -> %08x", bytes, a);
       break;
     }
@@ -927,6 +929,17 @@ LONG CALLBACK VectoredHandler(EXCEPTION_POINTERS* ep) {
 }
 
 }  // namespace
+
+void DosDumpHeap(const char* path) {
+  FILE* f = std::fopen(path, "wb");
+  if (!f) return;
+  for (auto& b : g_bigBlocks) {
+    std::fwrite(&b.first, 4, 1, f);
+    std::fwrite(&b.second, 4, 1, f);
+    std::fwrite(reinterpret_cast<void*>(uintptr_t(b.first)), 1, b.second, f);
+  }
+  std::fclose(f);
+}
 
 void DosSetWatch(uint32_t hostAddr) { g_watchAddr = hostAddr; g_watchArmed = false; }
 

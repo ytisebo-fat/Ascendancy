@@ -76,8 +76,13 @@ struct CameraInput {
 };
 CameraInput TakeCameraInput();
 // Screen area (game coordinates, inclusive) and game screen where the camera
-// controls apply.
-void SetCameraArea(int x0, int y0, int x1, int y1, int screen);
+// controls apply. Several areas may be registered.
+void AddCameraArea(int x0, int y0, int x1, int y1, int screen);
+
+// Help popup: returns true while the game's help window is open, with its
+// rectangle (game coordinates). Used to let any click close a help popup
+// that was opened by a help-click (right-click / Shift+click).
+void SetHelpPopupQuery(bool (*query)(int* x0, int* y0, int* x1, int* y1));
 
 // Testing aid: scripted input, e.g. "3000:click:320:293,6000:key:esc".
 void SetInputScript(const std::string& script);

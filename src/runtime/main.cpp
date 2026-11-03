@@ -178,6 +178,29 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (!script.empty()) asc::video::SetInputScript(script);
+  // Help popup: the window manager's table (0xFA368, 12-byte entries: state,
+  // window object, 0) holds HELPWINDOW; state 2 = open. Window objects start
+  // with 0x12345678, rectangle at +8, name at +0x20.
+  asc::video::SetHelpPopupQuery([](int* x0, int* y0, int* x1, int* y1) -> bool {
+    static uint32_t entry = 0;
+    if (!entry) {
+      for (uint32_t e = 0xFA368; e < 0xFA938; e += 12) {
+        uint32_t obj = *image.Ptr<uint32_t>(e + 4);
+        if (obj < 0x10000 || IsBadReadPtr(reinterpret_cast<void*>(uintptr_t(obj)), 0x30)) continue;
+        const uint8_t* o = reinterpret_cast<const uint8_t*>(uintptr_t(obj));
+        if (*reinterpret_cast<const uint32_t*>(o) == 0x12345678 &&
+            !std::strncmp(reinterpret_cast<const char*>(o + 0x20), "HELPWINDOW", 11)) {
+          entry = e;
+          break;
+        }
+      }
+      if (!entry) return false;
+    }
+    if (*image.Ptr<uint32_t>(entry) != 2) return false;
+    const int32_t* r = reinterpret_cast<const int32_t*>(uintptr_t(*image.Ptr<uint32_t>(entry + 4) + 8));
+    *x0 = r[0]; *y0 = r[1]; *x1 = r[2]; *y1 = r[3];
+    return true;
+  });
   // Current game screen: u16 in the window manager object (0 = main menu).
   asc::video::SetScreenQuery([] { return int(*image.Ptr<uint16_t>(0xFE584)); });
   asc::video::g_debugPeek = [](uint32_t a) { return *image.Ptr<uint32_t>(a); };

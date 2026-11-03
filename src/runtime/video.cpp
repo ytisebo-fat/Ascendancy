@@ -68,8 +68,20 @@ int64_t g_scriptRelease = -1;
 int g_scriptReleaseButton = 0;
 std::string g_winshotPath;
 
+// Help popups opened by a help-click close on a click anywhere: the click is
+// delivered to the popup's OK button (game-visible mouse position override).
+bool (*g_helpQuery)(int*, int*, int*, int*) = nullptr;
+uint64_t g_helpClickAt = 0;     // time of the last help-click
+bool g_helpPopupOurs = false;   // the open help popup was opened by a help-click
+struct {
+  int state = 0;                // 0 idle, 1 pressed, 2 release requested, 3 released
+  uint64_t t0 = 0;
+  int x = 0, y = 0;
+} g_synth;
+
 // Camera controls (wheel / middle-button drag) for 3D views
-struct { int x0 = 0, y0 = 0, x1 = -1, y1 = -1, screen = -1; } g_camArea;
+struct CamArea { int x0, y0, x1, y1, screen; };
+std::vector<CamArea> g_camAreas;
 CameraInput g_camInput;
 bool g_midDown = false, g_midMoved = false;
 int g_midX = 0, g_midY = 0, g_midTravel = 0;
@@ -205,8 +217,11 @@ void SaveSettings() {
 void ApplyFullscreen();
 
 bool InCameraArea(int x, int y) {
-  return !g_panel.open() && g_screenQuery && g_screenQuery() == g_camArea.screen && x >= g_camArea.x0 &&
-         y >= g_camArea.y0 && x <= g_camArea.x1 && y <= g_camArea.y1;
+  if (g_panel.open() || !g_screenQuery) return false;
+  int screen = g_screenQuery();
+  for (const CamArea& a : g_camAreas)
+    if (a.screen == screen && x >= a.x0 && y >= a.y0 && x <= a.x1 && y <= a.y1) return true;
+  return false;
 }
 
 // Caller holds g_lock.
@@ -247,6 +262,36 @@ void OnMiddleDrag() {
 // The port's UI (Options button / panel) gets first pick; everything else
 // goes to the game.
 // ---------------------------------------------------------------------------
+bool HelpPopupOpen(int* x0, int* y0, int* x1, int* y1) {
+  return g_helpQuery && g_helpQuery(x0, y0, x1, y1);
+}
+
+// Caller holds g_lock. Returns true if the press was turned into "OK".
+bool HelpPopupClick(bool down) {
+  if (g_synth.state != 0) {
+    if (!down && g_synth.state == 1) g_synth.state = 2;
+    return true;
+  }
+  if (!down || !g_helpPopupOurs) return false;
+  int x0, y0, x1, y1;
+  if (!HelpPopupOpen(&x0, &y0, &x1, &y1)) return false;
+  // The OK button is the full-width bar at the bottom of the help window.
+  g_synth = {1, NowUs(), (x0 + x1) / 2, y1 - 23};
+  return true;
+}
+
+// Advances the synthetic OK click. Caller holds g_lock.
+void UpdateSyntheticClick() {
+  uint64_t now = NowUs();
+  if (g_synth.state == 2 && now - g_synth.t0 > 80000) { g_synth.state = 3; g_synth.t0 = now; }
+  if (g_synth.state == 3 && now - g_synth.t0 > 80000) g_synth.state = 0;
+  // Track whether the open help popup came from a help-click.
+  int a, b, c, d;
+  bool open = HelpPopupOpen(&a, &b, &c, &d);
+  if (!open) g_helpPopupOurs = false;
+  else if (!g_helpPopupOurs && now - g_helpClickAt < 1500000) g_helpPopupOurs = true;
+}
+
 void OnPointerMove(int x, int y) {
   g_mouse.x = x;
   g_mouse.y = y;
@@ -281,7 +326,10 @@ void OnPointerButton(bool down, int sdlButton) {
   }
   if (g_panel.open()) return;  // nothing reaches the game while the panel is open
   if (!down && g_swallowRelease) { g_swallowRelease = false; return; }
+  if ((sdlButton == SDL_BUTTON_LEFT || sdlButton == SDL_BUTTON_RIGHT) && HelpPopupClick(down)) return;
   int bit = sdlButton == SDL_BUTTON_LEFT ? 1 : sdlButton == SDL_BUTTON_RIGHT ? 2 : 0;
+  bool helpClick = down && ((bit == 2 && g_settings.rightClickHelp) || (bit == 1 && (g_shift & 3)));
+  if (helpClick) g_helpClickAt = NowUs();
   if (bit == 2 && g_settings.rightClickHelp) {
     // Right-click = the game's "help-click" (Shift + left click): report the
     // left button, with Shift held until shortly after release.
@@ -364,6 +412,10 @@ void RunScriptLocked() {
       OnMiddle(true);
     } else if (e.kind == "mup") {
       OnMiddle(false);
+    } else if (e.kind == "dumpheap") {
+      char name[64];
+      std::snprintf(name, sizeof name, "\\heap_%05llu.bin", (unsigned long long)e.atMs);
+      DosDumpHeap((g_cfg.screenshotDir + name).c_str());
     } else if (e.kind == "dump") {  // debug: write the game's data object to a file
       char name[64];
       std::snprintf(name, sizeof name, "\\dump_%05llu.bin", (unsigned long long)e.atMs);
@@ -509,6 +561,7 @@ void HandleEvents() {
   g_realShift = (m & KMOD_SHIFT) != 0;
   if (NowUs() < g_helpShiftUntil) g_shift |= 2;
   RunScriptLocked();
+  UpdateSyntheticClick();
   ClampMouse();
   // The Options button follows the game's screen.
   bool uiVisible = g_panel.open() || OnMainMenu();
@@ -808,6 +861,7 @@ void Present(bool) {
   if (g_cfg.headless) {
     Lock lock;
     RunScriptLocked();
+    UpdateSyntheticClick();
     ClampMouse();
     if (g_inputListener) g_inputListener();
   }
@@ -853,15 +907,26 @@ bool SaveScreenshot(const std::string& path) {
   return WritePngRGBA(path, kWidth, kHeight, rgba);
 }
 
-Mouse GetMouse() {
-  if (g_cfg.headless) Present();
-  Lock lock;
+// What the game sees: the real mouse, or the help popup's OK button while a
+// synthetic OK click is in progress.
+Mouse GameMouseLocked() {
   Mouse m = g_mouse;
+  if (g_synth.state != 0) {
+    m.x = g_synth.x;
+    m.y = g_synth.y;
+    m.buttons = g_synth.state <= 2 ? 1 : 0;
+  }
   return m;
 }
 
+Mouse GetMouse() {
+  if (g_cfg.headless) Present();
+  Lock lock;
+  return GameMouseLocked();
+}
+
 // Called from the input listener (lock already held by the caller thread).
-Mouse GetMouseNoPump() { return g_mouse; }
+Mouse GetMouseNoPump() { return GameMouseLocked(); }
 
 void SetInputListener(void (*fn)()) { g_inputListener = fn; }
 
@@ -891,7 +956,10 @@ bool PopKey(uint16_t* key) {
   return true;
 }
 
-uint8_t ShiftFlags() { return uint8_t(g_shift | g_scriptShift); }
+uint8_t ShiftFlags() {
+  uint8_t help = NowUs() < g_helpShiftUntil ? 2 : 0;  // right-click help (also when headless)
+  return uint8_t(g_shift | g_scriptShift | help);
+}
 
 void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_t>& mask, int w,
                     int h, int offX, int offY, int shape) {
@@ -917,12 +985,12 @@ CameraInput TakeCameraInput() {
   return in;
 }
 
-void SetCameraArea(int x0, int y0, int x1, int y1, int screen) {
+void AddCameraArea(int x0, int y0, int x1, int y1, int screen) {
   Lock lock;
-  g_camArea.x0 = x0; g_camArea.y0 = y0; g_camArea.x1 = x1; g_camArea.y1 = y1;
-  g_camArea.screen = screen;
+  g_camAreas.push_back({x0, y0, x1, y1, screen});
 }
 void SetScreenQuery(int (*fn)()) { g_screenQuery = fn; }
+void SetHelpPopupQuery(bool (*fn)(int*, int*, int*, int*)) { g_helpQuery = fn; }
 
 void SetInputScript(const std::string& script) {
   size_t pos = 0;
