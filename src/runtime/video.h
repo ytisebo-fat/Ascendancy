@@ -67,6 +67,18 @@ void SetCursorVisibilityQuery(bool (*visibleFn)());
 // Which game screen is showing (0 = main menu); used for the Options button.
 void SetScreenQuery(int (*screenFn)());
 
+// Camera input for 3D views (wheel zoom, middle-button drag), collected on
+// the render thread and taken once per game frame by the game thread.
+struct CameraInput {
+  int zoomSteps = 0;        // + = further away, - = closer
+  float yawDegrees = 0, tiltDegrees = 0;
+  bool recenter = false;    // middle click without dragging
+};
+CameraInput TakeCameraInput();
+// Screen area (game coordinates, inclusive) and game screen where the camera
+// controls apply.
+void SetCameraArea(int x0, int y0, int x1, int y1, int screen);
+
 // Testing aid: scripted input, e.g. "3000:click:320:293,6000:key:esc".
 void SetInputScript(const std::string& script);
 

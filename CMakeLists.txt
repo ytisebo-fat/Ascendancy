@@ -55,6 +55,7 @@ if(WIN32)
     src/runtime/vfx_driver.cpp
     src/runtime/settings.cpp
     src/runtime/options_ui.cpp
+    src/runtime/camera.cpp
   )
   # SDL2 (static). Point SDL2_ROOT at the SDL2 MinGW development package's
   # i686-w64-mingw32 directory.

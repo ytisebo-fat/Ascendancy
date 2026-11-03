@@ -26,6 +26,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   planet screens work with mouse and keyboard, borderless fullscreen by
   default. Not yet: sound, intro movie verified, long play sessions.
 
+  Star map: **mouse wheel** zooms, **hold the middle button and drag** to
+  rotate (left/right) and tilt (up/down), **middle click** re-centres.
+
   Right-click anything for the game's built-in help popup (the original
   "help-click", Shift+click, still works too).
 

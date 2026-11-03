@@ -118,6 +118,17 @@ routine `0x57EFC`, twice over different fills for an exact mask) is drawn by
 the render thread at the live mouse position. Visibility follows the game's
 show/hide counter (`0x1220AC`) and off-screen flag (`0x1220E4`).
 
+### Star map camera
+
+`windows.txt` defines the camera buttons (ROTLEFT … ZOOMIN, messages 50–56
+to COSMOSWnd). They only toggle continuous motion (flags at window+0xC0);
+each frame message 59 calls `0x23834` rotate (EDX −1 spin / 0 tilt, float
+degrees), `0x23878` zoom (±1, distance 20–60), `0x2390C` update view and the
+window's redraw method. The port captures the COSMOSWnd instance through
+its vtable entry (0x85A54) and applies wheel/drag input with the same
+functions once per frame, from a hook on the main loop's call to the frame
+function (0x1CC03) — always on the game thread at a defined point.
+
 ### Input
 
 - Mouse: the game registers an 18-byte real-mode callback with the mouse

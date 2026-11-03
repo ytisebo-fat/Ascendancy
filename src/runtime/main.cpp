@@ -14,6 +14,7 @@
 #include <string>
 
 #include "assets/cob.h"
+#include "runtime/camera.h"
 #include "runtime/dos.h"
 #include "runtime/settings.h"
 #include "runtime/game_image.h"
@@ -21,7 +22,7 @@
 #include "runtime/vfx_driver.h"
 #include "runtime/video.h"
 
-namespace asc::video { extern uint32_t (*g_debugPeek)(uint32_t); }
+namespace asc::video { extern uint32_t (*g_debugPeek)(uint32_t); extern void (*g_debugDump)(const char*); }
 
 namespace {
 
@@ -169,6 +170,7 @@ int main(int argc, char** argv) {
                 "Ascendancy", MB_ICONERROR);
     return 1;
   }
+  if (!asc::InstallCameraControls(image)) Log("camera controls unavailable");
   asc::DosInstall(&image, cfg);
   if (!asc::video::Init(vcfg)) {
     MessageBoxA(nullptr, "Could not open the game window (see ascendancy.log).", "Ascendancy",
@@ -179,6 +181,13 @@ int main(int argc, char** argv) {
   // Current game screen: u16 in the window manager object (0 = main menu).
   asc::video::SetScreenQuery([] { return int(*image.Ptr<uint16_t>(0xFE584)); });
   asc::video::g_debugPeek = [](uint32_t a) { return *image.Ptr<uint32_t>(a); };
+  asc::video::g_debugDump = [](const char* path) {
+    const auto& o = image.le().objects()[1];
+    if (FILE* f = std::fopen(path, "wb")) {
+      std::fwrite(image.Ptr<uint8_t>(o.preferredBase), 1, o.virtualSize, f);
+      std::fclose(f);
+    }
+  };
   SetupRuntimeGlobals(image, gameDir);
   SetCurrentDirectoryA(gameDir.c_str());
 

@@ -73,6 +73,9 @@ these can land before the full source port:
 - **Help:** right-click = the game's help-click (done). Later: hover
   tooltips — a short one-line summary from the same help texts after a
   short hover delay, once the window manager's hit-testing is mapped.
+- **Camera controls** (done for the star map): wheel zoom, middle-drag
+  rotate/tilt, middle-click re-centre, using the game's own camera functions.
+  Next: the same for the battle view (BatModeWnd) and the research tree.
 - **Sound variety:** the original plays the same click sound for every
   button; once audio is in, optionally vary it (per-button sounds or slight
   pitch/volume variation).

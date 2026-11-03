@@ -18,6 +18,7 @@
 namespace asc::video {
 uint32_t g_debugOffscreenWindowHost = 0;
 uint32_t (*g_debugPeek)(uint32_t origAddr) = nullptr;
+void (*g_debugDump)(const char* path) = nullptr;
 namespace {
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,8 @@ uint8_t g_pal6[256 * 3];
 uint32_t g_pal32[256];
 
 CRITICAL_SECTION g_lock;
+// Initialised at start-up so the API is usable before Init().
+struct LockInit { LockInit() { InitializeCriticalSection(&g_lock); } } g_lockInit;
 Mouse g_mouse;            // what the game sees
 uint16_t g_keys[64];
 int g_keyHead = 0, g_keyCount = 0;
@@ -64,6 +67,14 @@ std::vector<ScriptEvent> g_script;
 int64_t g_scriptRelease = -1;
 int g_scriptReleaseButton = 0;
 std::string g_winshotPath;
+
+// Camera controls (wheel / middle-button drag) for 3D views
+struct { int x0 = 0, y0 = 0, x1 = -1, y1 = -1, screen = -1; } g_camArea;
+CameraInput g_camInput;
+bool g_midDown = false, g_midMoved = false;
+int g_midX = 0, g_midY = 0, g_midTravel = 0;
+constexpr float kDegreesPerPixel = 0.5f;
+constexpr int kZoomStepsPerNotch = 2;
 
 // Options panel (render thread)
 FntFont g_bigFont, g_smallFont;
@@ -193,6 +204,44 @@ void SaveSettings() {
 // Forward declarations (render thread)
 void ApplyFullscreen();
 
+bool InCameraArea(int x, int y) {
+  return !g_panel.open() && g_screenQuery && g_screenQuery() == g_camArea.screen && x >= g_camArea.x0 &&
+         y >= g_camArea.y0 && x <= g_camArea.x1 && y <= g_camArea.y1;
+}
+
+// Caller holds g_lock.
+void OnWheel(int notches) {
+  if (!InCameraArea(g_mouse.x, g_mouse.y)) return;
+  g_camInput.zoomSteps -= notches * kZoomStepsPerNotch;  // wheel up = closer
+}
+
+// Middle button: drag rotates (left/right) and tilts (up/down); a click
+// without dragging re-centres. Caller holds g_lock.
+void OnMiddle(bool down) {
+  if (down) {
+    if (!InCameraArea(g_mouse.x, g_mouse.y)) return;
+    g_midDown = true;
+    g_midMoved = false;
+    g_midTravel = 0;
+    g_midX = g_mouse.x;
+    g_midY = g_mouse.y;
+  } else if (g_midDown) {
+    g_midDown = false;
+    if (!g_midMoved) g_camInput.recenter = true;
+  }
+}
+
+void OnMiddleDrag() {
+  if (!g_midDown) return;
+  int dx = g_mouse.x - g_midX, dy = g_mouse.y - g_midY;
+  g_midX = g_mouse.x;
+  g_midY = g_mouse.y;
+  g_midTravel += (dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy);
+  if (g_midTravel > 3) g_midMoved = true;
+  g_camInput.yawDegrees += dx * kDegreesPerPixel;
+  g_camInput.tiltDegrees += dy * kDegreesPerPixel;
+}
+
 // ---------------------------------------------------------------------------
 // Input routing, shared by real events and scripted input. Caller holds g_lock.
 // The port's UI (Options button / panel) gets first pick; everything else
@@ -202,6 +251,7 @@ void OnPointerMove(int x, int y) {
   g_mouse.x = x;
   g_mouse.y = y;
   ClampMouse();
+  OnMiddleDrag();
   if (g_panel.open()) {
     if (g_panel.OnMove(g_mouse.x, g_mouse.y)) g_uiDirty = true;
   } else {
@@ -211,6 +261,7 @@ void OnPointerMove(int x, int y) {
 }
 
 void OnPointerButton(bool down, int sdlButton) {
+  if (sdlButton == SDL_BUTTON_MIDDLE) { OnMiddle(down); return; }
   if (down && sdlButton == SDL_BUTTON_LEFT) {
     if (g_panel.open()) {
       ui::Action a = g_panel.OnClick(g_mouse.x, g_mouse.y, g_settings);
@@ -307,6 +358,16 @@ void RunScriptLocked() {
       char name[64];
       std::snprintf(name, sizeof name, "\\win_%05llu.png", (unsigned long long)e.atMs);
       g_winshotPath = g_cfg.screenshotDir + name;
+    } else if (e.kind == "wheel") {  // wheel:<notches> (+ = up/closer)
+      OnWheel(e.a);
+    } else if (e.kind == "mdown") {
+      OnMiddle(true);
+    } else if (e.kind == "mup") {
+      OnMiddle(false);
+    } else if (e.kind == "dump") {  // debug: write the game's data object to a file
+      char name[64];
+      std::snprintf(name, sizeof name, "\\dump_%05llu.bin", (unsigned long long)e.atMs);
+      if (g_debugDump) g_debugDump((g_cfg.screenshotDir + name).c_str());
     } else if (e.kind == "peek") {
       uint32_t a = uint32_t(std::strtoul(e.key.c_str(), nullptr, 16));
       if (g_debugPeek) Log("peek %08x = %08x", a, g_debugPeek(a));
@@ -423,6 +484,9 @@ void HandleEvents() {
       }
       case SDL_KEYDOWN:
         OnKeyDown(e.key.keysym);
+        break;
+      case SDL_MOUSEWHEEL:
+        OnWheel(e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y);
         break;
       case SDL_WINDOWEVENT:
         if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
@@ -707,7 +771,6 @@ bool Init(const Config& cfg) {
   g_cfg = cfg;
   g_settings = cfg.settings;
   g_startUs = NowUs();
-  InitializeCriticalSection(&g_lock);
   for (int i = 0; i < 256; ++i) SetPalette(i, 0, 0, 0);
   if (g_bigFont.Parse(cfg.bigFont) && g_smallFont.Parse(cfg.smallFont))
     g_panel.SetFonts(&g_bigFont, &g_smallFont);
@@ -845,6 +908,20 @@ void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_
 }
 
 void SetCursorVisibilityQuery(bool (*fn)()) { g_cursorVisible = fn; }
+
+CameraInput TakeCameraInput() {
+  if (g_cfg.headless) Present();
+  Lock lock;
+  CameraInput in = g_camInput;
+  g_camInput = CameraInput{};
+  return in;
+}
+
+void SetCameraArea(int x0, int y0, int x1, int y1, int screen) {
+  Lock lock;
+  g_camArea.x0 = x0; g_camArea.y0 = y0; g_camArea.x1 = x1; g_camArea.y1 = y1;
+  g_camArea.screen = screen;
+}
 void SetScreenQuery(int (*fn)()) { g_screenQuery = fn; }
 
 void SetInputScript(const std::string& script) {
