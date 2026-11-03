@@ -206,9 +206,29 @@ SDL_Window* g_window = nullptr;
 SDL_Renderer* g_renderer = nullptr;
 SDL_Texture* g_texture = nullptr;
 
+bool confineDirty = true;
+
+// In fullscreen the 4:3 picture has black bars at the sides. Keep the OS
+// mouse inside the picture: otherwise it can wander into a bar while the game
+// pointer stays clamped at the edge, and seems to stick there when moving back.
+// (Windowed mode leaves the mouse free so it can reach other windows.)
+void UpdateMouseConfinement() {
+  bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+  if (!fs) {
+    SDL_SetWindowMouseRect(g_window, nullptr);
+    return;
+  }
+  int x0, y0, x1, y1;
+  SDL_RenderLogicalToWindow(g_renderer, 0.0f, 0.0f, &x0, &y0);
+  SDL_RenderLogicalToWindow(g_renderer, float(kWidth), float(kHeight), &x1, &y1);
+  SDL_Rect r{x0, y0, x1 - x0, y1 - y0};
+  if (r.w > 0 && r.h > 0) SDL_SetWindowMouseRect(g_window, &r);
+}
+
 void ToggleFullscreen() {
   bool fs = SDL_GetWindowFlags(g_window) & SDL_WINDOW_FULLSCREEN_DESKTOP;
   SDL_SetWindowFullscreen(g_window, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+  confineDirty = true;
 }
 
 void HandleEvents() {
@@ -238,9 +258,17 @@ void HandleEvents() {
         if (e.key.keysym.sym == SDLK_RETURN && (e.key.keysym.mod & KMOD_ALT)) { ToggleFullscreen(); break; }
         if (uint16_t k = BiosKey(e.key.keysym)) PushKey(k);
         break;
+      case SDL_WINDOWEVENT:
+        if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
+          confineDirty = true;
+        break;
       default:
         break;
     }
+  }
+  if (confineDirty) {
+    confineDirty = false;
+    UpdateMouseConfinement();
   }
   SDL_Keymod m = SDL_GetModState();
   g_shift = uint8_t(((m & KMOD_RSHIFT) ? 1 : 0) | ((m & KMOD_LSHIFT) ? 2 : 0) |
