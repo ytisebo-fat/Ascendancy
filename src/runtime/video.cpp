@@ -4,6 +4,7 @@
 #include <SDL.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -473,12 +474,17 @@ void ApplyFullscreen() {
   g_imageDirty = true;
 }
 
-// 4:3 picture, as large as fits, centred (black bars elsewhere).
+// 4:3 picture, as large as fits, centred (black bars elsewhere). Pixel
+// perfect: the largest whole-number multiple of 640x480 that fits.
 void UpdateLayout() {
   SDL_GetRendererOutputSize(g_renderer, &g_outW, &g_outH);
   SDL_GetWindowSize(g_window, &g_winW, &g_winH);
   int w = g_outW, h = g_outW * 3 / 4;
   if (h > g_outH) { h = g_outH; w = g_outH * 4 / 3; }
+  if (g_settings.filter == Filter::kPixelPerfect) {
+    int k = std::min(g_outW / kWidth, g_outH / kHeight);
+    if (k >= 1) { w = kWidth * k; h = kHeight * k; }
+  }
   g_dst = {(g_outW - w) / 2, (g_outH - h) / 2, w, h};
 }
 
@@ -626,7 +632,7 @@ void UploadGameImage() {
 
 void DrawGameImage() {
   switch (g_settings.filter) {
-    case Filter::kSharp:
+    case Filter::kPixelPerfect:
       SDL_SetTextureScaleMode(g_tex, SDL_ScaleModeNearest);
       SDL_RenderCopy(g_renderer, g_tex, nullptr, &g_dst);
       break;
@@ -721,7 +727,7 @@ void DrawPointer() {
     for (size_t i = 0; i < px.size(); ++i) px[i] = c.mask[i] ? g_pal32[c.pix[i]] : 0;
     SDL_UpdateTexture(g_ptrTex, nullptr, px.data(), c.w * 4);
     SDL_SetTextureBlendMode(g_ptrTex, SDL_BLENDMODE_BLEND);
-    SDL_SetTextureScaleMode(g_ptrTex, g_settings.filter == Filter::kSharp ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
+    SDL_SetTextureScaleMode(g_ptrTex, g_settings.filter == Filter::kPixelPerfect ? SDL_ScaleModeNearest : SDL_ScaleModeLinear);
     g_ptrVersion = c.version;
     g_ptrIsArrow = isArrow;
   }

@@ -5,7 +5,7 @@
 namespace asc {
 
 enum class Filter {
-  kSharp,    // nearest neighbour: hard pixels (uneven at non-integer scales)
+  kPixelPerfect,  // largest whole-number enlargement: every pixel exactly square (wider black border)
   kCrisp,    // integer pre-scale + smooth final step: sharp but even pixels
   kSoft,     // bilinear: soft, slightly blurry
   kSmooth,   // Scale2x pixel-art upscaler, then soft: rounded edges

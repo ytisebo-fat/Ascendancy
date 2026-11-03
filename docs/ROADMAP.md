@@ -54,7 +54,7 @@ these can land before the full source port:
 
 - **Options panel** (done): main-menu button + F12, in the game's style and
   font; settings in `ascendancy.ini`.
-- **Filters** (done): Crisp (sharp-bilinear, default), Sharp pixels, Soft,
+- **Filters** (done): Crisp (sharp-bilinear, default), Pixel perfect (integer scaling), Soft,
   Smooth art (Scale2x on palette indices), CRT scanlines. Possible later:
   GPU shader filters (xBR/ScaleFX, curved CRT) if a shader backend is added.
 - **16:9:** first, a 16:9 frame around the 4:3 game (ambient star-field side

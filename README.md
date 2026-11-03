@@ -34,11 +34,11 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   "help-click", Shift+click, still works too); click anywhere to close it.
 
   **Options panel:** the *Options* button on the main menu, or **F12** at any
-  time: fullscreen/window, picture filter (Crisp, Sharp pixels, Soft, Smooth
+  time: fullscreen/window, picture filter (Crisp, Pixel perfect, Soft, Smooth
   art, CRT monitor), right-click behaviour. Saved to `ascendancy.ini`.
 
   Command line (overrides the ini for one session): `--windowed`,
-  `--fullscreen`, `--filter sharp|crisp|soft|smooth|crt`, `--no-right-help`.
+  `--fullscreen`, `--filter pixel|crisp|soft|smooth|crt`, `--no-right-help`.
   `Alt+Enter` toggles fullscreen. Debug: `--trace`, `--trace-irq`, `--trace-vfx`, `--headless`,
   `--shots <ms>`, `--script "<ms>:click:<x>:<y>,<ms>:key:<k>,<ms>:shot,<ms>:winshot"`
   (with `SDL_VIDEODRIVER=offscreen` the full window can be tested without a display).

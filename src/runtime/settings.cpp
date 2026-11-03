@@ -7,7 +7,7 @@ namespace asc {
 
 const char* FilterName(Filter f) {
   switch (f) {
-    case Filter::kSharp: return "Sharp pixels";
+    case Filter::kPixelPerfect: return "Pixel perfect";
     case Filter::kCrisp: return "Crisp";
     case Filter::kSoft: return "Soft";
     case Filter::kSmooth: return "Smooth art";
@@ -18,7 +18,7 @@ const char* FilterName(Filter f) {
 
 const char* FilterDescription(Filter f) {
   switch (f) {
-    case Filter::kSharp: return "Plain enlarged pixels, like the original.";
+    case Filter::kPixelPerfect: return "Exact square pixels, whole-number size, black border.";
     case Filter::kCrisp: return "Sharp, even pixels with smooth edges. Recommended.";
     case Filter::kSoft: return "Soft and blurry, hides the pixels.";
     case Filter::kSmooth: return "Rounds off jagged pixel edges (Scale2x).";
@@ -29,7 +29,7 @@ const char* FilterDescription(Filter f) {
 
 const char* FilterKey(Filter f) {
   switch (f) {
-    case Filter::kSharp: return "sharp";
+    case Filter::kPixelPerfect: return "pixel";
     case Filter::kCrisp: return "crisp";
     case Filter::kSoft: return "soft";
     case Filter::kSmooth: return "smooth";
@@ -50,6 +50,7 @@ bool Settings::Load(const std::string& path) {
     else if (!std::strcmp(key, "filter")) {
       for (int i = 0; i < int(Filter::kCount); ++i)
         if (!std::strcmp(val, FilterKey(Filter(i)))) filter = Filter(i);
+      if (!std::strcmp(val, "sharp")) filter = Filter::kPixelPerfect;  // older builds
     }
   }
   std::fclose(f);
@@ -63,7 +64,7 @@ bool Settings::Save(const std::string& path) const {
                "; Ascendancy native port settings (also changeable in-game: F12)\n"
                "[display]\n"
                "fullscreen = %d\n"
-               "filter = %s        ; sharp, crisp, soft, smooth, crt\n"
+               "filter = %s        ; pixel, crisp, soft, smooth, crt\n"
                "\n[mouse]\n"
                "right_click_help = %d\n",
                fullscreen ? 1 : 0, FilterKey(filter), rightClickHelp ? 1 : 0);
