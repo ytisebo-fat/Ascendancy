@@ -45,7 +45,10 @@ struct Cursor {
   std::vector<uint8_t> pix, mask;
   int w = 0, h = 0, offX = 0, offY = 0;
   int version = 0;
+  int shape = -1;
 };
+constexpr int kHelpPointerShape = 1;  // arrow with "HELP", shown while Shift is held
+bool g_realShift = false;             // Shift physically held
 Cursor g_cursor;
 Cursor g_arrow;           // the game's arrow pointer, used over the options panel
 bool (*g_cursorVisible)() = nullptr;
@@ -439,6 +442,7 @@ void HandleEvents() {
   SDL_Keymod m = SDL_GetModState();
   g_shift = uint8_t(((m & KMOD_RSHIFT) ? 1 : 0) | ((m & KMOD_LSHIFT) ? 2 : 0) |
                     ((m & KMOD_CTRL) ? 4 : 0) | ((m & KMOD_ALT) ? 8 : 0));
+  g_realShift = (m & KMOD_SHIFT) != 0;
   if (NowUs() < g_helpShiftUntil) g_shift |= 2;
   RunScriptLocked();
   ClampMouse();
@@ -584,7 +588,12 @@ void DrawPointer() {
   bool overPanel = g_panel.open();
   bool visible = overPanel || (g_cursorVisible && g_cursorVisible());
   if (!visible) return;
-  const Cursor& c = (overPanel && g_arrow.w) ? g_arrow : g_cursor;
+  // A right-click is a help-click (Shift + click) for the game, which makes it
+  // switch to its "HELP" pointer; keep the normal arrow for that - the HELP
+  // pointer only shows when Shift is really held.
+  bool helpFromRightClick = (NowUs() < g_helpShiftUntil || g_scriptShift) && !g_realShift;
+  bool useArrow = overPanel || (g_cursor.shape == kHelpPointerShape && helpFromRightClick);
+  const Cursor& c = (useArrow && g_arrow.w) ? g_arrow : g_cursor;
   if (!c.w) return;
   bool isArrow = &c == &g_arrow;
   if (!g_ptrTex || g_ptrVersion != c.version || g_ptrIsArrow != isArrow) {
@@ -830,6 +839,7 @@ void SetCursorImage(const std::vector<uint8_t>& pixels, const std::vector<uint8_
   g_cursor.h = h;
   g_cursor.offX = offX;
   g_cursor.offY = offY;
+  g_cursor.shape = shape;
   ++g_cursor.version;
   if (shape == 0 && !g_arrow.w) { g_arrow = g_cursor; g_arrow.version = 1 << 30; }
 }
