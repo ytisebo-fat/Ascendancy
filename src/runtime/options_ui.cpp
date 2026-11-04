@@ -21,7 +21,7 @@ constexpr uint32_t kLabel = 0xFF7FD0A0;       // the game's green
 constexpr uint32_t kDim = 0xFF5E6B70;
 constexpr uint32_t kDesc = 0xFFAEB8BC;
 
-const Rect kPanel{100, 92, 440, 300};
+const Rect kPanel{100, 40, 440, 400};
 
 void Fill(uint32_t* p, Rect r, uint32_t c) {
   for (int y = r.y; y < r.y + r.h; ++y) {
@@ -78,16 +78,22 @@ void Button(uint32_t* p, const FntFont* f, Rect r, const std::string& label, boo
 }  // namespace
 
 Rect OptionsPanel::ItemRect(int id) {
-  const int col1 = 250, row0 = 136, step = 44;
+  const int col1 = 250, col2 = 386, arrowR = 486;
   switch (id) {
-    case kFullscreen: return {col1, row0, 126, 22};
-    case kWindow: return {col1 + 136, row0, 126, 22};
-    case kFilterPrev: return {col1, row0 + step, 26, 22};
-    case kFilterNext: return {col1 + 236, row0 + step, 26, 22};
-    case kHelpOn: return {col1, row0 + 2 * step + 18, 126, 22};
-    case kHelpOff: return {col1 + 136, row0 + 2 * step + 18, 126, 22};
-    case kAspect43: return {col1, row0 + 3 * step + 18, 126, 22};
-    case kClose: return {270, 348, 100, 24};
+    case kFullscreen: return {col1, 84, 126, 22};
+    case kWindow: return {col2, 84, 126, 22};
+    case kFilterPrev: return {col1, 120, 26, 22};
+    case kFilterNext: return {arrowR, 120, 26, 22};
+    case kHelpOn: return {col1, 166, 126, 22};
+    case kHelpOff: return {col2, 166, 126, 22};
+    case kAspect43: return {col1, 202, 126, 22};
+    case kMusicDown: return {col1, 246, 26, 22};
+    case kMusicUp: return {arrowR, 246, 26, 22};
+    case kFxDown: return {col1, 282, 26, 22};
+    case kFxUp: return {arrowR, 282, 26, 22};
+    case kClickPrev: return {col1, 318, 26, 22};
+    case kClickNext: return {arrowR, 318, 26, 22};
+    case kClose: return {270, 386, 100, 24};
     default: return {0, 0, 0, 0};
   }
 }
@@ -115,6 +121,18 @@ Action OptionsPanel::OnClick(int x, int y, Settings& s) {
     case kFilterNext: s.filter = Filter((int(s.filter) + 1) % n); return Action::kChanged;
     case kHelpOn: if (!s.rightClickHelp) { s.rightClickHelp = true; return Action::kChanged; } break;
     case kHelpOff: if (s.rightClickHelp) { s.rightClickHelp = false; return Action::kChanged; } break;
+    case kMusicDown: if (s.musicVolume > 0) { --s.musicVolume; return Action::kChanged; } break;
+    case kMusicUp: if (s.musicVolume < 10) { ++s.musicVolume; return Action::kChanged; } break;
+    case kFxDown: if (s.effectsVolume > 0) { --s.effectsVolume; return Action::kChanged; } break;
+    case kFxUp: if (s.effectsVolume < 10) { ++s.effectsVolume; return Action::kChanged; } break;
+    case kClickPrev: {
+      const int c = int(ClickSound::kCount);
+      s.clickSound = ClickSound((int(s.clickSound) + c - 1) % c);
+      return Action::kChanged;
+    }
+    case kClickNext:
+      s.clickSound = ClickSound((int(s.clickSound) + 1) % int(ClickSound::kCount));
+      return Action::kChanged;
     case kClose: return Action::kClose;
     default:
       if (!kPanel.Contains(x, y)) return Action::kClose;  // click outside closes
@@ -163,10 +181,41 @@ void OptionsPanel::Draw(uint32_t* p, const Settings& s, bool menuButton, bool me
   wide.x += 136;
   Button(p, big_, wide, "16:9 (soon)", false, false, true);
 
-  Rect snd = ItemRect(kAspect43);
-  snd.y += 36;
-  label("Sound", snd);
-  Text(p, big_, "coming soon", snd.x + 6, snd.y + 5, kDim);
+  // Sound: two volume bars and the click sound.
+  auto valueBox = [&](int prevId, int nextId) {
+    Rect a = ItemRect(prevId), b = ItemRect(nextId);
+    return Rect{a.x + a.w + 6, a.y, b.x - a.x - a.w - 12, a.h};
+  };
+  auto volume = [&](const char* name, int downId, int upId, int value) {
+    label(name, ItemRect(downId));
+    Button(p, big_, ItemRect(downId), "-", false, hov(downId) && value > 0, value == 0);
+    Button(p, big_, ItemRect(upId), "+", false, hov(upId) && value < 10, value == 10);
+    Rect box = valueBox(downId, upId);
+    Fill(p, box, kButton);
+    Frame(p, box, 2);
+    if (value == 0) {
+      TextCentered(p, big_, "Off", box, kDim);
+      return;
+    }
+    const int segW = (box.w - 8 - 9 * 3) / 10;
+    const int x0 = box.x + (box.w - (segW * 10 + 9 * 3)) / 2;
+    for (int i = 0; i < 10; ++i)
+      Fill(p, {x0 + i * (segW + 3), box.y + 6, segW, box.h - 12}, i < value ? kLabel : kStoneDark);
+  };
+  Fill(p, {kPanel.x + 20, 236, kPanel.w - 40, 1}, kStoneDark);
+  volume("Music", kMusicDown, kMusicUp, s.musicVolume);
+  volume("Effects", kFxDown, kFxUp, s.effectsVolume);
+
+  label("Clicks", ItemRect(kClickPrev));
+  Button(p, big_, ItemRect(kClickPrev), "<", false, hov(kClickPrev));
+  Button(p, big_, ItemRect(kClickNext), ">", false, hov(kClickNext));
+  Rect cbox = valueBox(kClickPrev, kClickNext);
+  Fill(p, cbox, kButtonOn);
+  Frame(p, cbox, 2);
+  TextCentered(p, big_, ClickSoundName(s.clickSound), cbox, kText);
+  Rect cp = ItemRect(kClickPrev), cn = ItemRect(kClickNext);
+  TextCentered(p, small_, ClickSoundDescription(s.clickSound),
+               {cp.x - 10, cp.y + 26, cn.x + cn.w - cp.x + 20, 12}, kDesc);
 
   Button(p, big_, ItemRect(kClose), "Close", false, hov(kClose));
   TextCentered(p, small_, "F12 opens this panel at any time  -  Esc closes it",

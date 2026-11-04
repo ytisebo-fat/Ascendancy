@@ -167,9 +167,25 @@ skipped.
 ### Status of the runner
 
 Logo → main menu → new game setup → species briefing → star map → planet
-screens run natively (tested under Wine; real-Windows test pending). No sound
-yet: real-mode memory (DPMI 0100h) is refused so the game skips its Sound
-Blaster drivers cleanly; the native audio layer (AIL digital API) is next.
+screens, diplomacy, battles run natively (tested under Wine and on Windows),
+with sound and music.
+
+### Sound
+
+The game's sound module (`ssystem.cpp`, object at 0xF8638) is unchanged; the
+Miles AIL 3.02 digital functions under it are replaced (`audio.cpp`, cdecl
+hooks at the AIL entry points 0x633B8 …0x6459A): `AIL_install_DIG_INI`
+returns a token instead of loading a Sound Blaster driver, sample handles are
+voices of an SDL audio mixer (48 kHz float, Hermite resampling, Miles
+volume/pan, soft clipping). Effects: `soundfx.txt` names, loaded from
+`data\NAME.voc` with the 42-byte header skipped, 22050 Hz, handles 1–7.
+Music: handle 0, `music.txt` tracks (8-bit 22050 Hz RAW) streamed through two
+0xC800-byte buffers (`AIL_sample_buffer_ready` / `AIL_load_sample_buffer`)
+that the game refills from its frame limiter (0x5013C → 0x4AEA4), so the
+music keeps up as long as the game loop runs; tracks resume where they left
+off. Clicks: at `AIL_start_sample` the sample address is looked up in the
+game's effect cache (0xBB4, 6 × 0x16 bytes: +8 address, +0x14 effect number);
+effect 0 (`button`) gets the selected click variation.
 
 ## Tools
 

@@ -9,6 +9,17 @@
 
 namespace asc {
 
+bool VerifyHook(GameImage& image, const HookSpec& spec) {
+  const LeObject* obj = nullptr;
+  for (const auto& o : image.le().objects())
+    if (spec.orig >= o.preferredBase && spec.orig + 5 <= o.preferredBase + o.virtualSize) obj = &o;
+  if (!obj || std::memcmp(&obj->data[spec.orig - obj->preferredBase], spec.expect, spec.expectLen) != 0) {
+    Log("hook %s at %08x: unexpected bytes - unsupported ASCEND.EXE version?", spec.name, spec.orig);
+    return false;
+  }
+  return true;
+}
+
 bool InstallHook(GameImage& image, const HookSpec& spec) {
   const LeObject* obj = nullptr;
   for (const auto& o : image.le().objects())

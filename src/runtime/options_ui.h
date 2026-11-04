@@ -42,7 +42,8 @@ class OptionsPanel {
 
  private:
   enum Id {
-    kFullscreen, kWindow, kFilterPrev, kFilterNext, kHelpOn, kHelpOff, kAspect43, kClose, kCount
+    kFullscreen, kWindow, kFilterPrev, kFilterNext, kHelpOn, kHelpOff, kAspect43,
+    kMusicDown, kMusicUp, kFxDown, kFxUp, kClickPrev, kClickNext, kClose, kCount
   };
   static Rect ItemRect(int id);
 

@@ -14,6 +14,7 @@
 #include <string>
 
 #include "assets/cob.h"
+#include "runtime/audio.h"
 #include "runtime/camera.h"
 #include "runtime/dos.h"
 #include "runtime/settings.h"
@@ -106,7 +107,7 @@ int main(int argc, char** argv) {
   asc::video::Config vcfg;
   std::string script;
   bool traceVfx = false;
-  bool forceWindowed = false, forceFullscreen = false, noRightHelp = false;
+  bool forceWindowed = false, forceFullscreen = false, noRightHelp = false, noSound = false;
   std::string forceFilter;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--game") && i + 1 < argc) gameDir = argv[++i];
@@ -119,6 +120,7 @@ int main(int argc, char** argv) {
     else if (!std::strcmp(argv[i], "--smooth")) forceFilter = "soft";
     else if (!std::strcmp(argv[i], "--filter") && i + 1 < argc) forceFilter = argv[++i];
     else if (!std::strcmp(argv[i], "--no-right-help")) noRightHelp = true;
+    else if (!std::strcmp(argv[i], "--no-sound")) noSound = true;
     else if (!std::strcmp(argv[i], "--headless")) vcfg.headless = true;
     else if (!std::strcmp(argv[i], "--script") && i + 1 < argc) script = argv[++i];
     else if (!std::strcmp(argv[i], "--shots") && i + 1 < argc) vcfg.screenshotEveryMs = std::atoi(argv[++i]);
@@ -157,8 +159,8 @@ int main(int argc, char** argv) {
   if (noRightHelp) vcfg.settings.rightClickHelp = false;
   for (int f = 0; f < int(asc::Filter::kCount); ++f)
     if (forceFilter == asc::FilterKey(asc::Filter(f))) vcfg.settings.filter = asc::Filter(f);
+  static asc::CobFileSystem fs;
   {
-    asc::CobFileSystem fs;
     std::string ferr;
     if (fs.MountFromConfig(gameDir, &ferr)) {
       fs.ReadFile("data\\bigfont.fnt", &vcfg.bigFont);
@@ -178,6 +180,11 @@ int main(int argc, char** argv) {
     return 1;
   }
   if (!script.empty()) asc::video::SetInputScript(script);
+  if (!noSound) {
+    asc::audio::Config acfg;
+    acfg.readGameFile = [](const char* name, std::vector<uint8_t>* out) { return fs.ReadFile(name, out); };
+    if (!asc::audio::Install(image, acfg, vcfg.settings)) Log("sound unavailable");
+  }
   // Help popup: the window manager's table (0xFA368, 12-byte entries: state,
   // window object, 0) holds HELPWINDOW; state 2 = open. Window objects start
   // with 0x12345678, rectangle at +8, name at +0x20.

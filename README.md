@@ -12,7 +12,7 @@ DOS 4X space strategy game — no DOSBox required.
 | Phase | What | State |
 |---|---|---|
 | 0 | Tooling: archive/sprite readers, LE executable loader core, Ghidra pipeline | **in progress** |
-| 1 | Native runner: original game code runs directly on the CPU, DOS/VGA/sound replaced by Windows/SDL | **in progress** — menus, new game and star map run natively; no sound yet |
+| 1 | Native runner: original game code runs directly on the CPU, DOS/VGA/sound replaced by Windows/SDL | **in progress** — the whole game runs natively, with sound and music |
 | 1.5 | Smarter AI (not harder — no extra cheats), borderless fullscreen, filters, 16:9 | planned |
 | 2 | Full C++ source port, original executable no longer needed | long-term |
 
@@ -24,7 +24,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
 - `Ascendancy.exe` — the Phase 1 runner. Put it in your Ascendancy folder and
   run it. Logo, main menu, new-game setup, species briefing, star map and
   planet screens work with mouse and keyboard, borderless fullscreen by
-  default. Not yet: sound, intro movie verified, long play sessions.
+  default, with sound effects and music. Not yet verified: the intro movie.
 
   Star map and system view: **mouse wheel** zooms, **hold the middle button
   and drag** to rotate (left/right; star map also tilts up/down), **middle
@@ -36,7 +36,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
 
   **Options panel:** the *Options* button on the main menu, or **F12** at any
   time: fullscreen/window, picture filter (Crisp, Pixel perfect, Soft, Smooth
-  art, CRT monitor), right-click behaviour. Saved to `ascendancy.ini`.
+  art, CRT monitor), right-click behaviour, music and effects volume, and the
+  button click (*Original*, *Varied* - subtly different every time - or
+  *Mixed* - takes turns with the game's other click sounds). Saved to
+  `ascendancy.ini`. `--no-sound` starts without sound.
 
   Command line (overrides the ini for one session): `--windowed`,
   `--fullscreen`, `--filter pixel|crisp|soft|smooth|crt`, `--no-right-help`.

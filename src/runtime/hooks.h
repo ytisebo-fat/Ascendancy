@@ -21,6 +21,9 @@ struct HookSpec {
   void* replacement;
 };
 
+// Checks the original bytes only (to install a group of hooks all-or-nothing).
+bool VerifyHook(GameImage& image, const HookSpec& spec);
+
 // Verifies and installs; logs and returns false on mismatch.
 bool InstallHook(GameImage& image, const HookSpec& spec);
 

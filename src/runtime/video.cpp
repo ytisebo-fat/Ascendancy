@@ -1,5 +1,7 @@
 #include "runtime/video.h"
 
+#include "runtime/audio.h"
+
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
 #include <windows.h>
@@ -211,6 +213,7 @@ bool OnMainMenu() {
 }
 
 void SaveSettings() {
+  audio::ApplySettings(g_settings);
   if (!g_cfg.settingsPath.empty()) g_settings.Save(g_cfg.settingsPath);
 }
 
@@ -316,9 +319,15 @@ void OnPointerButton(bool down, int sdlButton) {
   if (sdlButton == SDL_BUTTON_MIDDLE) { OnMiddle(down); return; }
   if (down && sdlButton == SDL_BUTTON_LEFT) {
     if (g_panel.open()) {
+      const Settings before = g_settings;
       ui::Action a = g_panel.OnClick(g_mouse.x, g_mouse.y, g_settings);
       if (a == ui::Action::kClose) g_panel.Close();
-      if (a == ui::Action::kChanged) { SaveSettings(); ApplyFullscreen(); }
+      if (a == ui::Action::kChanged) {
+        SaveSettings();
+        ApplyFullscreen();
+        if (g_settings.clickSound != before.clickSound || g_settings.effectsVolume != before.effectsVolume)
+          audio::PreviewClick();
+      }
       g_uiDirty = true;
       g_swallowRelease = true;
       return;

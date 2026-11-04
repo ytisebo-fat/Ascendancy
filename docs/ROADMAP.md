@@ -39,7 +39,7 @@ redirected:
 - [x] Video: the game's VFX driver (VESA480.DLL) replaced by a native one → SDL2 window, palette, borderless fullscreen
 - [x] Mouse (int 33h + real-mode handler at 0000:04F0) and keyboard (int 16h) → SDL events
 - [x] Timer (PIT/IRQ0) → ticker thread, interrupts delivered at instruction boundaries
-- [ ] Sound: Miles AIL 3.02 digital → SDL audio (VOC effects, RAW music)
+- [x] Sound: Miles AIL 3.02 digital → SDL audio (VOC effects, RAW music)
 - [ ] FLC intro/cutscenes
 - [x] Safety net: unexpected `int`/port I/O caught and logged (ascendancy.log)
 - [x] Watcom start-up + heap + COB archive loading run natively (tested under Wine)
@@ -77,9 +77,9 @@ these can land before the full source port:
   wheel zoom, middle-drag rotate (+ tilt on the star map), middle-click
   re-centre, using the game's own camera functions. Possible: research tree.
 - **Wheel scrolling in lists** (done): every list window (windows.txt TYPE 10).
-- **Sound variety:** the original plays the same click sound for every
-  button; once audio is in, optionally vary it (per-button sounds or slight
-  pitch/volume variation).
+- **Sound variety** (done, adjust after listening): the original plays the
+  same click for every button; Options > Clicks: Original / Varied (pitch and
+  volume variation) / Mixed (the game's unused clicks, loudness-matched).
 - The Antagonizer (`ANTAG.EXE`) can be supported by the same runner if wanted.
 
 ## Phase 2 — full source port
