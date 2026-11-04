@@ -30,9 +30,12 @@ uint32_t g_cosmosHandler = 0;     // host address of the original handler
 uint32_t g_batWnd = 0;            // last BatModeWnd (system view / battles)
 uint32_t g_batHandler = 0;
 uint32_t g_frameFunction = 0;     // host address of the original frame function
+uint32_t g_resWnd = 0;            // last RESWIN (research tree)
+uint32_t g_resHandler = 0;
 void __cdecl CameraBeforeFrame();
 void CosmosHandlerThunk();
 void BatHandlerThunk();
+void ResHandlerThunk();
 void FrameThunk();
 }
 
@@ -60,6 +63,17 @@ constexpr int kScreenSystem = 16;
 constexpr int kBatZoomStep = 10;
 constexpr int kScreenStarMap = 1;
 
+// Research tree (RESWIN, screen 20; reswin.cpp handler 0x42A64, vtable entry
+// 0x85EB8). Its buttons (messages 50-53) set flags that the per-frame message
+// 0x3A applies: rotate = 0x4E954(window+0x11F, float degrees) ret 4 (+-3 per
+// frame), move = float at window+0xE3 (+-2 per frame; Home sets -100 = top),
+// then the redraw method (vtable +0xC).
+constexpr uint32_t kResHandlerSlot = 0x85EB8, kResHandler = 0x42A64;
+constexpr uint32_t kResRotate = 0x4E954;
+constexpr int kScreenResearch = 20;
+constexpr float kResMovePerZoomStep = 12.0f;   // wheel: 2 zoom steps per notch
+constexpr float kResMovePerPixel = 1.0f;       // middle-drag up/down
+
 GameImage* g_image = nullptr;
 
 // Message-handler thunk: remember the window (EAX), continue in the original.
@@ -73,6 +87,9 @@ __asm__(
     "_BatHandlerThunk:\n"
     "  movl %eax, _g_batWnd\n"
     "  jmp *_g_batHandler\n"
+    "_ResHandlerThunk:\n"
+    "  movl %eax, _g_resWnd\n"
+    "  jmp *_g_resHandler\n"
     "_FrameThunk:\n"
     "  pushal\n"
     "  pushfl\n"
@@ -122,6 +139,26 @@ void UpdateAndRedraw(uint32_t wnd) {
 }
 
 void Recenter(uint32_t wnd) { CallWindowFn(g_image->Host(kRecenter), wnd); }
+
+// fn(EAX = obj, [stack] float) ret 4
+void CallWithFloat(uint32_t fn, uint32_t obj, float value) {
+  uint32_t bits;
+  std::memcpy(&bits, &value, 4);
+  uint32_t edx = 0;
+  __asm__ volatile(
+      "pushl %[v]\n\t"
+      "call *%[fn]\n\t"
+      : "+a"(obj), "+d"(edx)
+      : [v] "D"(bits), [fn] "S"(fn)
+      : "ecx", "memory", "cc");
+}
+
+void Redraw(uint32_t wnd) {
+  uint32_t vtable;
+  std::memcpy(&vtable, reinterpret_cast<void*>(uintptr_t(wnd + 0xA7)), 4);
+  uint32_t redraw = *reinterpret_cast<uint32_t*>(uintptr_t(vtable + 0xC));
+  CallWindowFn(redraw, wnd, 0);
+}
 
 int g_zoomPending = 0;  // in zoom steps (1 unit each), applied one per frame
 
@@ -224,12 +261,34 @@ void SystemViewFrame(const video::CameraInput& in) {
 }
 }  // namespace
 
+namespace {
+void ResearchFrame(const video::CameraInput& in) {
+  using namespace asc;
+  uint32_t w = g_resWnd;
+  float* pos = reinterpret_cast<float*>(uintptr_t(w + 0xE3));
+  bool changed = false;
+  if (in.recenter) { *pos = -100.0f; changed = true; }  // like Home: back to the top
+  float move = float(in.zoomSteps) * kResMovePerZoomStep + in.tiltDegrees * 2.0f * kResMovePerPixel /* degrees -> pixels */;
+  if (move != 0.0f) { *pos += move; changed = true; }
+  if (in.yawDegrees != 0.0f) {
+    CallWithFloat(g_image->Host(kResRotate), w + 0x11F, in.yawDegrees);
+    changed = true;
+  }
+  if (changed) Redraw(w);
+}
+}  // namespace
+
 extern "C" void __cdecl CameraBeforeFrame() {
   video::CameraInput in = video::TakeCameraInput();
   if (in.listScroll != 0) ScrollListAt(in.listX, in.listY, in.listScroll);
   int screen = *g_image->Ptr<uint16_t>(0xFE584);
   if (screen == kScreenSystem && g_batWnd) {
     SystemViewFrame(in);
+    return;
+  }
+  if (screen == kScreenResearch && g_resWnd) {
+    g_zoomPending = 0;
+    ResearchFrame(in);
     return;
   }
   if (screen != kScreenStarMap || !g_cosmosWnd) {
@@ -270,7 +329,9 @@ bool InstallCameraControls(GameImage& image) {
   }
   uint32_t* slot = image.Ptr<uint32_t>(kCosmosHandlerSlot);
   uint32_t* batSlot = image.Ptr<uint32_t>(kBatHandlerSlot);
-  if (*slot != image.Host(kCosmosHandler) || *batSlot != image.Host(kBatHandler)) {
+  uint32_t* resSlot = image.Ptr<uint32_t>(kResHandlerSlot);
+  if (*slot != image.Host(kCosmosHandler) || *batSlot != image.Host(kBatHandler) ||
+      *resSlot != image.Host(kResHandler)) {
     Log("camera: window vtables not as expected - camera controls disabled");
     return false;
   }
@@ -279,6 +340,8 @@ bool InstallCameraControls(GameImage& image) {
   g_frameFunction = image.Host(kFrameFunction);
   *slot = uint32_t(uintptr_t(&CosmosHandlerThunk));
   *batSlot = uint32_t(uintptr_t(&BatHandlerThunk));
+  g_resHandler = image.Host(kResHandler);
+  *resSlot = uint32_t(uintptr_t(&ResHandlerThunk));
   for (uint32_t at : {kFrameCallSite, kModalFrameCallSite}) {
     uint8_t* site = image.Ptr<uint8_t>(at);
     int32_t newRel = int32_t(uintptr_t(&FrameThunk) - (uintptr_t(site) + 5));
@@ -287,6 +350,7 @@ bool InstallCameraControls(GameImage& image) {
   }
   video::AddCameraArea(7, 7, 465, 472, kScreenStarMap);  // COSMOSWnd
   video::AddCameraArea(7, 7, 465, 472, kScreenSystem);   // BatModeWnd
+  video::AddCameraArea(7, 46, 476, 472, kScreenResearch); // RESWIN
   return true;
 }
 

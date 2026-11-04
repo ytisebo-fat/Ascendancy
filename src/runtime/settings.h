@@ -19,6 +19,7 @@ const char* FilterKey(Filter f);          // value in the ini file
 
 // The button click (the game uses one sound for every button).
 enum class ClickSound {
+  kSoft,      // the game's click, quieter and mellower (default)
   kOriginal,  // the game's click, identical every time
   kVaried,    // the game's click with subtle random pitch/volume changes
   kMixed,     // rotates through the game's (unused) click sounds, loudness-matched
@@ -34,7 +35,7 @@ struct Settings {
   bool rightClickHelp = true;
   int musicVolume = 7;    // 0..10
   int effectsVolume = 8;  // 0..10
-  ClickSound clickSound = ClickSound::kVaried;
+  ClickSound clickSound = ClickSound::kSoft;
 
   bool Load(const std::string& path);
   bool Save(const std::string& path) const;

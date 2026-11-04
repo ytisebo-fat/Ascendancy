@@ -41,6 +41,7 @@ const char* FilterKey(Filter f) {
 
 const char* ClickSoundName(ClickSound c) {
   switch (c) {
+    case ClickSound::kSoft: return "Soft";
     case ClickSound::kOriginal: return "Original";
     case ClickSound::kVaried: return "Varied";
     case ClickSound::kMixed: return "Mixed";
@@ -50,6 +51,7 @@ const char* ClickSoundName(ClickSound c) {
 
 const char* ClickSoundDescription(ClickSound c) {
   switch (c) {
+    case ClickSound::kSoft: return "The game's click, much quieter and mellower.";
     case ClickSound::kOriginal: return "The game's button click, the same every time.";
     case ClickSound::kVaried: return "The game's click, slightly different every time.";
     case ClickSound::kMixed: return "Takes turns with the game's other click sounds.";
@@ -59,10 +61,11 @@ const char* ClickSoundDescription(ClickSound c) {
 
 const char* ClickSoundKey(ClickSound c) {
   switch (c) {
+    case ClickSound::kSoft: return "soft";
     case ClickSound::kOriginal: return "original";
     case ClickSound::kVaried: return "varied";
     case ClickSound::kMixed: return "mixed";
-    default: return "varied";
+    default: return "soft";
   }
 }
 
@@ -81,7 +84,7 @@ bool Settings::Load(const std::string& path) {
     else if (!std::strcmp(key, "right_click_help")) rightClickHelp = std::strcmp(val, "0") != 0;
     else if (!std::strcmp(key, "music_volume")) musicVolume = Clamp10(std::atoi(val));
     else if (!std::strcmp(key, "effects_volume")) effectsVolume = Clamp10(std::atoi(val));
-    else if (!std::strcmp(key, "click_sound")) {
+    else if (!std::strcmp(key, "click")) {
       for (int i = 0; i < int(ClickSound::kCount); ++i)
         if (!std::strcmp(val, ClickSoundKey(ClickSound(i)))) clickSound = ClickSound(i);
     }
@@ -108,7 +111,7 @@ bool Settings::Save(const std::string& path) const {
                "\n[sound]\n"
                "music_volume = %d     ; 0..10\n"
                "effects_volume = %d   ; 0..10\n"
-               "click_sound = %s  ; original, varied, mixed\n",
+               "click = %s  ; soft, original, varied, mixed\n",
                fullscreen ? 1 : 0, FilterKey(filter), rightClickHelp ? 1 : 0, musicVolume,
                effectsVolume, ClickSoundKey(clickSound));
   std::fclose(f);

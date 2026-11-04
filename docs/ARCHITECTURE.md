@@ -185,7 +185,20 @@ that the game refills from its frame limiter (0x5013C → 0x4AEA4), so the
 music keeps up as long as the game loop runs; tracks resume where they left
 off. Clicks: at `AIL_start_sample` the sample address is looked up in the
 game's effect cache (0xBB4, 6 × 0x16 bytes: +8 address, +0x14 effect number);
-effect 0 (`button`) gets the selected click variation.
+effect 0 (`button`) gets the selected click variation (default *Soft*: the
+game's click through a 2 kHz low-pass, 5 ms fade-in, about -10 dB).
+The game polls `AIL_sample_buffer_ready` tens of millions of times per second
+from its idle loop; that call has a lock-free fast path (a per-voice "buffer
+may be free" flag), otherwise the mixer thread starves on the lock
+(crackling, dropouts).
+
+### Research tree
+
+RESWIN (screen 20, handler 0x42A64, vtable entry 0x85EB8): its buttons set
+motion flags applied by the per-frame message 0x3A: rotate =
+`0x4E954(window+0x11F, float degrees)`, move = float at window+0xE3 (the
+drawing clamps it; Home sets −100). The port feeds wheel and middle-drag
+into the same two operations from the frame hook.
 
 ## Tools
 

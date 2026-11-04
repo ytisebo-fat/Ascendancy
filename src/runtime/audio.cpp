@@ -22,7 +22,6 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
-#include <memory>
 #include <random>
 
 #include "runtime/dos.h"
@@ -49,6 +48,7 @@ struct Variant {
 enum BufState : uint8_t { kEmpty, kReserved, kQueued };
 
 struct Voice {
+  int index = 0;  // in g_list (kept across AIL_init_sample)
   int status = kSmpDone;
   int format = 0, flags = 0, rate = 11025, volume = 127, pan = 64, loops = 1;
   const uint8_t* addr[2] = {};
@@ -77,23 +77,41 @@ Lock::Lock() { EnterCriticalSection(&g_cs); }
 Lock::~Lock() { LeaveCriticalSection(&g_cs); }
 
 GameImage* g_image = nullptr;
-std::vector<std::unique_ptr<Voice>> g_voices;
+// Sample handles. Entries are written before g_count is raised and never
+// freed, so handles can be validated without taking the lock.
+constexpr int kMaxVoices = 16;
+Voice* g_list[kMaxVoices];
+std::atomic<int> g_count{0};
+// Per voice: "a music buffer may be free". The game polls
+// AIL_sample_buffer_ready in its idle loop tens of millions of times a
+// second; this flag lets those calls return without the mixer's lock (which
+// would otherwise starve the audio thread and make the sound crackle).
+std::atomic<int> g_maybeReady[kMaxVoices];
 Voice g_preview;  // options panel click preview (not a game sample)
 SDL_AudioDeviceID g_dev = 0;
 int g_devRate = 48000;
 uint32_t g_driverToken[16];
 
 std::atomic<float> g_musicGain{0.49f}, g_sfxGain{0.64f};
-std::atomic<int> g_clickMode{int(ClickSound::kVaried)};
+std::atomic<int> g_clickMode{int(ClickSound::kSoft)};
 std::vector<Variant> g_clicks;  // for ClickSound::kMixed
+Variant g_softClick;            // for ClickSound::kSoft
 std::mt19937 g_rng{GetTickCount()};
 int g_lastStep = 99, g_lastClick = -1;
 unsigned g_underruns = 0;
 
-Voice* V(int h) {
-  for (auto& v : g_voices)
-    if (reinterpret_cast<intptr_t>(v.get()) == h) return v.get();
+Voice* V(intptr_t h) {
+  int n = g_count.load(std::memory_order_acquire);
+  for (int i = 0; i < n; ++i)
+    if (reinterpret_cast<intptr_t>(g_list[i]) == h) return g_list[i];
   return nullptr;
+}
+
+// Caller holds the lock.
+void UpdateReadyHint(const Voice& v) {
+  bool any = !v.streaming;
+  for (int i = 0; i < 2 && !any; ++i) any = v.buf[i] == kEmpty && i != v.cur;
+  g_maybeReady[v.index].store(any ? 1 : 0, std::memory_order_release);
 }
 
 float Gain10(int v) {
@@ -210,8 +228,13 @@ void SDLCALL AudioCallback(void*, Uint8* stream, int bytes) {
   std::memset(stream, 0, size_t(bytes));
   {
     Lock lock;
-    for (auto& v : g_voices)
-      if (v->status == kSmpPlaying) MixVoice(*v, out, frames, v->streaming);
+    int n = g_count.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i) {
+      Voice* v = g_list[i];
+      if (v->status != kSmpPlaying) continue;
+      MixVoice(*v, out, frames, v->streaming);
+      if (v->streaming) UpdateReadyHint(*v);
+    }
     if (g_preview.status == kSmpPlaying) MixVoice(g_preview, out, frames, false);
   }
   for (int i = 0; i < 2 * frames; ++i) out[i] = SoftClip(out[i]);
@@ -249,6 +272,10 @@ void VaryClick(Voice& v) {
   v.gain = 1.0f;
   int mode = g_clickMode.load();
   if (mode == int(ClickSound::kOriginal)) return;
+  if (mode == int(ClickSound::kSoft)) {
+    if (!g_softClick.data.empty()) v.variant = &g_softClick;
+    return;
+  }
   if (mode == int(ClickSound::kMixed) && g_clicks.size() >= 2) {
     int n = int(g_clicks.size());
     int pick = std::uniform_int_distribution<int>(0, n - 2)(g_rng);
@@ -328,14 +355,24 @@ intptr_t __cdecl InstallDigDriverFile(const char*, void*) { return InstallDigIni
 
 intptr_t __cdecl AllocateSampleHandle(intptr_t) {
   Lock lock;
-  if (g_voices.size() >= 16) return 0;
-  g_voices.push_back(std::make_unique<Voice>());
-  return reinterpret_cast<intptr_t>(g_voices.back().get());
+  int n = g_count.load();
+  if (n >= kMaxVoices) return 0;
+  Voice* v = new Voice;
+  v->index = n;
+  g_list[n] = v;
+  g_maybeReady[n] = 1;
+  g_count.store(n + 1, std::memory_order_release);
+  return reinterpret_cast<intptr_t>(v);
 }
 
 void __cdecl InitSample(intptr_t h) {
   Lock lock;
-  if (Voice* v = V(h)) *v = Voice{};
+  if (Voice* v = V(h)) {
+    int index = v->index;
+    *v = Voice{};
+    v->index = index;
+    g_maybeReady[index] = 1;
+  }
 }
 
 void __cdecl SetSampleType(intptr_t h, int format, unsigned flags) {
@@ -407,9 +444,9 @@ int __cdecl SampleStatus(intptr_t h) {
 int __cdecl MinimumSampleBufferSize(intptr_t, int, int) { return 0x2000; }
 
 int __cdecl SampleBufferReady(intptr_t h) {
-  Lock lock;
   Voice* v = V(h);
-  if (!v) return -1;
+  if (!v || !g_maybeReady[v->index].load(std::memory_order_acquire)) return -1;  // fast path
+  Lock lock;
   if (!v->streaming) {  // first use after AIL_init_sample
     v->streaming = true;
     v->cur = -1;
@@ -417,14 +454,16 @@ int __cdecl SampleBufferReady(intptr_t h) {
     v->fillIdx = -1;
     v->buf[0] = v->buf[1] = kEmpty;
   }
-  for (int i = 0; i < 2; ++i) {
+  int ready = -1;
+  for (int i = 0; i < 2 && ready < 0; ++i) {
     if (v->buf[i] == kEmpty && i != v->cur) {
       v->buf[i] = kReserved;
       v->fillIdx = i;
-      return i;
+      ready = i;
     }
   }
-  return -1;
+  UpdateReadyHint(*v);
+  return ready;
 }
 
 void __cdecl LoadSampleBuffer(intptr_t h, int n, const void* start, uint32_t len) {
@@ -451,6 +490,7 @@ void __cdecl LoadSampleBuffer(intptr_t h, int n, const void* start, uint32_t len
     ResetPlayback(*v);
     v->status = kSmpPlaying;
   }
+  UpdateReadyHint(*v);
 }
 
 }  // namespace
@@ -518,6 +558,30 @@ bool Install(GameImage& image, const Config& cfg, const Settings& settings) {
     }
   }
   Log("audio: %zu click sounds for \"Mixed\"", g_clicks.size());
+
+  // "Soft": the game's click, 2nd-order low-pass at 2 kHz (takes the edge
+  // off), a 5 ms fade-in (rounder attack) and about -9 dB.
+  if (!g_clicks.empty() && !std::strcmp(g_clicks[0].name, "button")) {
+    g_softClick.name = "soft";
+    const double fc = 2000.0, fs = 22050.0, q = 0.7071;
+    const double w = 2 * 3.14159265358979 * fc / fs, alpha = std::sin(w) / (2 * q), c = std::cos(w);
+    const double a0 = 1 + alpha;
+    const double b0 = (1 - c) / 2 / a0, b1 = (1 - c) / a0, b2 = b0;
+    const double a1 = -2 * c / a0, a2 = (1 - alpha) / a0;
+    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    std::vector<float> d = g_clicks[0].data;
+    d.resize(d.size() + 220, 0.0f);  // let the filter ring out
+    for (float& x : d) {
+      double y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+      x2 = x1; x1 = x; y2 = y1; y1 = y;
+      x = float(y);
+    }
+    const size_t attack = 110;
+    for (size_t i = 0; i < attack && i < d.size(); ++i) d[i] *= float(i) / attack;
+    const float gain = 0.36f;  // with the filter: about -9 dB in loudness
+    for (float& x : d) x *= gain;
+    g_softClick.data = std::move(d);
+  }
 
   if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
     Log("audio: SDL audio unavailable (%s) - no sound", SDL_GetError());

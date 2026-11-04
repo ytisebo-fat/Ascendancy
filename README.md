@@ -26,6 +26,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   planet screens work with mouse and keyboard, borderless fullscreen by
   default, with sound effects and music. Not yet verified: the intro movie.
 
+  Research tree: **mouse wheel** moves it up/down, **middle-drag** rotates
+  (left/right) and moves (up/down), **middle click** goes back to the top.
+
   Star map and system view: **mouse wheel** zooms, **hold the middle button
   and drag** to rotate (left/right; star map also tilts up/down), **middle
   click** re-centres. Elsewhere the **mouse wheel** scrolls the list under
@@ -37,8 +40,9 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
   **Options panel:** the *Options* button on the main menu, or **F12** at any
   time: fullscreen/window, picture filter (Crisp, Pixel perfect, Soft, Smooth
   art, CRT monitor), right-click behaviour, music and effects volume, and the
-  button click (*Original*, *Varied* - subtly different every time - or
-  *Mixed* - takes turns with the game's other click sounds). Saved to
+  button click (*Soft* - the default, quieter and mellower - *Original*,
+  *Varied* - subtly different every time - or *Mixed* - takes turns with
+  the game's other click sounds). Saved to
   `ascendancy.ini`. `--no-sound` starts without sound.
 
   Command line (overrides the ini for one session): `--windowed`,
