@@ -131,10 +131,13 @@ int g_zoomPending = 0;  // in zoom steps (1 unit each), applied one per frame
 // 0x191 (up) / 0x192 (down) - the auto-repeat messages of its arrow buttons -
 // and redraws itself. Fields: rectangle at +8 (x0,y0,x1,y1), item count u16
 // at +0x8C7, line height u16 at +0x8C9, top line u16 at +0x8CD.
-// The window manager's table (0xFA368..0xFA938, 12-byte entries: state,
-// window, 0) lists every window; state 2 = shown.
+// The window manager (0xFA35C) keeps a table of all windows at +0 (12-byte
+// entries: reference count, window, 0; up to 0x400) and, per screen
+// (+0x3064 + screen * 0x8E), up to 32 table indices at +0x306A. The current
+// screen is at +0x4228. The game finds e.g. PLAYERDIP the same way (0x521DC).
 constexpr uint32_t kListVtable = 0x85C70;
-constexpr uint32_t kWindowTable = 0xFA368, kWindowTableEnd = 0xFA938;
+constexpr uint32_t kWinMgr = 0xFA35C;
+constexpr uint32_t kScreenOffset = 0x4228, kScreenSlots = 0x306A, kScreenStride = 0x8E;
 constexpr uint32_t kMsgScrollUp = 0x191, kMsgScrollDown = 0x192;
 
 template <typename T>
@@ -156,9 +159,12 @@ void SendMessage3(uint32_t wnd, uint32_t msg) {
 // Scrolls the shown list window under (x, y) by `notches` (+ = down).
 void ScrollListAt(int x, int y, int notches) {
   uint32_t vtable = g_image->Host(kListVtable);
-  for (uint32_t e = kWindowTable; e < kWindowTableEnd; e += 12) {
-    if (*g_image->Ptr<uint32_t>(e) != 2) continue;
-    uint32_t obj = *g_image->Ptr<uint32_t>(e + 4);
+  int screen = *g_image->Ptr<int16_t>(kWinMgr + kScreenOffset);
+  if (screen < 0 || screen > 31) return;
+  for (int k = 0; k < 32; ++k) {
+    int idx = *g_image->Ptr<int32_t>(kWinMgr + kScreenSlots + uint32_t(screen) * kScreenStride + k * 4);
+    if (idx <= 0 || idx >= 0x400) continue;
+    uint32_t obj = *g_image->Ptr<uint32_t>(kWinMgr + 4 + uint32_t(idx) * 12);
     if (obj < 0x10000 || IsBadReadPtr(reinterpret_cast<void*>(uintptr_t(obj)), 0x8D0)) continue;
     if (Field<uint32_t>(obj, 0) != 0x12345678 || Field<uint32_t>(obj, 0xA7) != vtable) continue;
     int x0 = Field<int32_t>(obj, 8), y0 = Field<int32_t>(obj, 0xC);
@@ -169,9 +175,15 @@ void ScrollListAt(int x, int y, int notches) {
     int perNotch = visible >= 10 ? 3 : 1;  // long lists move faster
     int n = notches * perNotch;
     uint32_t msg = n > 0 ? kMsgScrollDown : kMsgScrollUp;
+    static int logged = 0;
+    if (logged < 3 && ++logged)
+      Log("wheel: scrolling list %.10s (table index %d, screen %d)",
+          reinterpret_cast<const char*>(uintptr_t(obj + 0x20)), idx, screen);
     for (int i = n > 0 ? n : -n; i > 0; --i) SendMessage3(obj, msg);
     return;
   }
+  static int missed = 0;
+  if (missed < 5 && ++missed) Log("wheel: no list under %d,%d on screen %d", x, y, screen);
 }
 
 }  // namespace
