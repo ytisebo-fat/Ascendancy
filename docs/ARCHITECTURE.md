@@ -127,7 +127,18 @@ degrees), `0x23878` zoom (±1, distance 20–60), `0x2390C` update view and the
 window's redraw method. The port captures the COSMOSWnd instance through
 its vtable entry (0x85A54) and applies wheel/drag input with the same
 functions once per frame, from a hook on the main loop's call to the frame
-function (0x1CC03) — always on the game thread at a defined point.
+function (0x1CC03, and the same call in the modal loop at 0x50A49) — always
+on the game thread at a defined point.
+
+### List scrolling
+
+All list windows (windows.txt TYPE 10: diplomacy phrases, species, save
+games, ship components, status lists) are one class (`gwindow.cpp`, vtable
+0x85C70). Its message handler (0x2DAB4) scrolls one line per message
+0x191/0x192 — the auto-repeat messages of its arrow buttons — and redraws.
+Wheel notches outside the camera areas are passed to the frame hook, which
+finds the shown list window under the pointer in the window manager's table
+(0xFA368) and sends it those messages (3 lines per notch for long lists).
 
 ### Input
 

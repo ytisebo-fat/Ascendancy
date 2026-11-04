@@ -73,6 +73,10 @@ struct CameraInput {
   int zoomSteps = 0;        // + = further away, - = closer
   float yawDegrees = 0, tiltDegrees = 0;
   bool recenter = false;    // middle click without dragging
+  // Wheel outside the camera areas (for scrolling list windows): notches,
+  // + = down, and the pointer position (game coordinates) at the last notch.
+  int listScroll = 0;
+  int listX = 0, listY = 0;
 };
 CameraInput TakeCameraInput();
 // Screen area (game coordinates, inclusive) and game screen where the camera

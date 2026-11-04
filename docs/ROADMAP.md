@@ -76,6 +76,7 @@ these can land before the full source port:
 - **Camera controls** (done for the star map and the system/battle view):
   wheel zoom, middle-drag rotate (+ tilt on the star map), middle-click
   re-centre, using the game's own camera functions. Possible: research tree.
+- **Wheel scrolling in lists** (done): every list window (windows.txt TYPE 10).
 - **Sound variety:** the original plays the same click sound for every
   button; once audio is in, optionally vary it (per-button sounds or slight
   pitch/volume variation).

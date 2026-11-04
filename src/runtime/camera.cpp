@@ -41,7 +41,8 @@ namespace {
 
 constexpr uint32_t kCosmosHandlerSlot = 0x85A54;  // vtable entry -> 0x21F84
 constexpr uint32_t kCosmosHandler = 0x21F84;
-constexpr uint32_t kFrameCallSite = 0x1CC03;      // call 0x4FAA0 (per-frame)
+constexpr uint32_t kFrameCallSite = 0x1CC03;      // call 0x4FAA0 (per-frame, main loop)
+constexpr uint32_t kModalFrameCallSite = 0x50A49; // same call in the modal loop (winmgr 0x509DC)
 constexpr uint32_t kFrameFunction = 0x4FAA0;
 constexpr uint32_t kRotate = 0x23834, kZoom = 0x23878, kUpdateView = 0x2390C;
 constexpr uint32_t kRecenter = 0x21EEC;  // (window EAX): zoom 35, default orientation
@@ -124,6 +125,55 @@ void Recenter(uint32_t wnd) { CallWindowFn(g_image->Host(kRecenter), wnd); }
 
 int g_zoomPending = 0;  // in zoom steps (1 unit each), applied one per frame
 
+// List windows (windows.txt TYPE 10: the diplomacy phrases, save games, ship
+// components, status lists, ...) are one class, gwindow.cpp, vtable 0x85C70.
+// Its message handler (vtable slot 2, 0x2DAB4) scrolls one line per message
+// 0x191 (up) / 0x192 (down) - the auto-repeat messages of its arrow buttons -
+// and redraws itself. Fields: rectangle at +8 (x0,y0,x1,y1), item count u16
+// at +0x8C7, line height u16 at +0x8C9, top line u16 at +0x8CD.
+// The window manager's table (0xFA368..0xFA938, 12-byte entries: state,
+// window, 0) lists every window; state 2 = shown.
+constexpr uint32_t kListVtable = 0x85C70;
+constexpr uint32_t kWindowTable = 0xFA368, kWindowTableEnd = 0xFA938;
+constexpr uint32_t kMsgScrollUp = 0x191, kMsgScrollDown = 0x192;
+
+template <typename T>
+T Field(uint32_t obj, uint32_t off) {
+  T v;
+  std::memcpy(&v, reinterpret_cast<const void*>(uintptr_t(obj + off)), sizeof v);
+  return v;
+}
+
+void SendMessage3(uint32_t wnd, uint32_t msg) {
+  uint32_t handler = *reinterpret_cast<uint32_t*>(uintptr_t(Field<uint32_t>(wnd, 0xA7) + 8));
+  uint32_t ebx = 0;
+  __asm__ volatile("call *%[fn]\n\t"
+                   : "+a"(wnd), "+d"(msg), "+b"(ebx)
+                   : [fn] "S"(handler)
+                   : "ecx", "memory", "cc");
+}
+
+// Scrolls the shown list window under (x, y) by `notches` (+ = down).
+void ScrollListAt(int x, int y, int notches) {
+  uint32_t vtable = g_image->Host(kListVtable);
+  for (uint32_t e = kWindowTable; e < kWindowTableEnd; e += 12) {
+    if (*g_image->Ptr<uint32_t>(e) != 2) continue;
+    uint32_t obj = *g_image->Ptr<uint32_t>(e + 4);
+    if (obj < 0x10000 || IsBadReadPtr(reinterpret_cast<void*>(uintptr_t(obj)), 0x8D0)) continue;
+    if (Field<uint32_t>(obj, 0) != 0x12345678 || Field<uint32_t>(obj, 0xA7) != vtable) continue;
+    int x0 = Field<int32_t>(obj, 8), y0 = Field<int32_t>(obj, 0xC);
+    int x1 = Field<int32_t>(obj, 0x10), y1 = Field<int32_t>(obj, 0x14);
+    if (x < x0 || x > x1 || y < y0 || y > y1) continue;
+    int lineH = Field<uint16_t>(obj, 0x8C9);
+    int visible = lineH > 0 ? (y1 - y0) / lineH : 1;
+    int perNotch = visible >= 10 ? 3 : 1;  // long lists move faster
+    int n = notches * perNotch;
+    uint32_t msg = n > 0 ? kMsgScrollDown : kMsgScrollUp;
+    for (int i = n > 0 ? n : -n; i > 0; --i) SendMessage3(obj, msg);
+    return;
+  }
+}
+
 }  // namespace
 }  // namespace asc
 
@@ -164,6 +214,7 @@ void SystemViewFrame(const video::CameraInput& in) {
 
 extern "C" void __cdecl CameraBeforeFrame() {
   video::CameraInput in = video::TakeCameraInput();
+  if (in.listScroll != 0) ScrollListAt(in.listX, in.listY, in.listScroll);
   int screen = *g_image->Ptr<uint16_t>(0xFE584);
   if (screen == kScreenSystem && g_batWnd) {
     SystemViewFrame(in);
@@ -196,12 +247,14 @@ bool InstallCameraControls(GameImage& image) {
   // Verify the original bytes: vtable entry and the call instruction.
   const auto& objs = image.le().objects();
   const LeObject& code = objs[0];
-  const uint8_t* callSite = &code.data[kFrameCallSite - code.preferredBase];
-  int32_t rel;
-  std::memcpy(&rel, callSite + 1, 4);
-  if (callSite[0] != 0xE8 || kFrameCallSite + 5 + uint32_t(rel) != kFrameFunction) {
-    Log("camera: main-loop call site not as expected - camera controls disabled");
-    return false;
+  for (uint32_t at : {kFrameCallSite, kModalFrameCallSite}) {
+    const uint8_t* callSite = &code.data[at - code.preferredBase];
+    int32_t rel;
+    std::memcpy(&rel, callSite + 1, 4);
+    if (callSite[0] != 0xE8 || at + 5 + uint32_t(rel) != kFrameFunction) {
+      Log("camera: frame call site not as expected - camera controls disabled");
+      return false;
+    }
   }
   uint32_t* slot = image.Ptr<uint32_t>(kCosmosHandlerSlot);
   uint32_t* batSlot = image.Ptr<uint32_t>(kBatHandlerSlot);
@@ -214,10 +267,12 @@ bool InstallCameraControls(GameImage& image) {
   g_frameFunction = image.Host(kFrameFunction);
   *slot = uint32_t(uintptr_t(&CosmosHandlerThunk));
   *batSlot = uint32_t(uintptr_t(&BatHandlerThunk));
-  uint8_t* site = image.Ptr<uint8_t>(kFrameCallSite);
-  int32_t newRel = int32_t(uintptr_t(&FrameThunk) - (uintptr_t(site) + 5));
-  std::memcpy(site + 1, &newRel, 4);
-  FlushInstructionCache(GetCurrentProcess(), site, 5);
+  for (uint32_t at : {kFrameCallSite, kModalFrameCallSite}) {
+    uint8_t* site = image.Ptr<uint8_t>(at);
+    int32_t newRel = int32_t(uintptr_t(&FrameThunk) - (uintptr_t(site) + 5));
+    std::memcpy(site + 1, &newRel, 4);
+    FlushInstructionCache(GetCurrentProcess(), site, 5);
+  }
   video::AddCameraArea(7, 7, 465, 472, kScreenStarMap);  // COSMOSWnd
   video::AddCameraArea(7, 7, 465, 472, kScreenSystem);   // BatModeWnd
   return true;

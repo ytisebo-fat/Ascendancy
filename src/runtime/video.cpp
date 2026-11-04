@@ -227,8 +227,14 @@ bool InCameraArea(int x, int y) {
 
 // Caller holds g_lock.
 void OnWheel(int notches) {
-  if (!InCameraArea(g_mouse.x, g_mouse.y)) return;
-  g_camInput.zoomSteps -= notches * kZoomStepsPerNotch;  // wheel up = closer
+  if (InCameraArea(g_mouse.x, g_mouse.y)) {
+    g_camInput.zoomSteps -= notches * kZoomStepsPerNotch;  // wheel up = closer
+    return;
+  }
+  if (g_panel.open() || !g_screenQuery) return;
+  g_camInput.listScroll -= notches;  // wheel up = scroll up
+  g_camInput.listX = g_mouse.x;
+  g_camInput.listY = g_mouse.y;
 }
 
 // Middle button: drag rotates (left/right) and tilts (up/down); a click

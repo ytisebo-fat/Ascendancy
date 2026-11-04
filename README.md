@@ -28,7 +28,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the full plan and
 
   Star map and system view: **mouse wheel** zooms, **hold the middle button
   and drag** to rotate (left/right; star map also tilts up/down), **middle
-  click** re-centres.
+  click** re-centres. Elsewhere the **mouse wheel** scrolls the list under
+  the pointer (diplomacy phrases, species, save games, ship components, ...).
 
   Right-click anything for the game's built-in help popup (the original
   "help-click", Shift+click, still works too); click anywhere to close it.
